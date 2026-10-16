@@ -1176,6 +1176,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
       <!-- Neue Kunde Felder -->
       <div id="an-kunde-felder" style="display:none;">
         <div id="an-kunde-gesperrt-hinweis" style="display:none;font-size:12px;color:var(--text2);margin-bottom:8px;">🔒 Bestandskunde: Diese Daten sind die Rechnungsadresse und werden hier nicht geändert. Änderungen im Kundendetail.</div>
+        <div class="form-group"><label>Firma <span style="font-weight:400;color:var(--text2);">(optional, z.B. Hausverwaltung)</span></label><input id="an-firma" placeholder="z.B. Hausverwaltung Muster GmbH"></div>
         <div class="form-row">
           <div class="form-group"><label>Vorname *</label><input id="an-vorname" placeholder="Max"></div>
           <div class="form-group"><label>Nachname *</label><input id="an-nachname" placeholder="Mustermann"></div>
@@ -1523,7 +1524,10 @@ function _auftragSchutz(w, o){
 // Zwei Listen zusammenfuehren: pro ID gewinnt der neuere Stand (_u),
 // bei Gleichstand die Cloud. Geloeschte IDs fallen raus, doppelte IDs auch.
 function _listeZusammenfuehren(liste, lokal, remote, geloescht){
-  const tot = (geloescht && geloescht[liste]) || {};
+  // v7.9.4: Backup-Wiederherstellung hebt aeltere Loesch-Markierungen auf (geloescht['wieder_'+liste])
+  const totRoh = (geloescht && geloescht[liste]) || {}, wieder = (geloescht && geloescht['wieder_'+liste]) || {};
+  const tot = {};
+  Object.keys(totRoh).forEach(function(id){ if(!(wieder[id] && wieder[id] >= totRoh[id])) tot[id] = totRoh[id]; });
   const lokalMap = new Map();
   (lokal||[]).forEach(function(x){ if(x && x.id!==undefined && x.id!==null) lokalMap.set(String(x.id), x); });
   const remoteHatEchte = (remote||[]).length > 0;
@@ -2604,10 +2608,10 @@ function updateSelects(){
   ['b-kunde','t-kunde'].forEach(sid=>{
     const s=document.getElementById(sid);if(!s)return;
     const first=sid==='b-kunde'?'<option value="">Kunde wählen...</option>':'<option value="">Kein Kunde</option>';
-    s.innerHTML=first+state.kunden.map(k=>`<option value="${k.id}">${fxEsc(kundeAnzeigeName(k))}${k.objekt?' – '+fxEsc(k.objekt):''}</option>`).join('');
+    s.innerHTML=first+state.kunden.map(k=>`<option value="${fxEsc(k.id)}">${fxEsc(kundeAnzeigeName(k))}${k.objekt?' – '+fxEsc(k.objekt):''}</option>`).join('');
   });
   const ms=document.getElementById('b-mitarbeiter');
-  if(ms)ms.innerHTML='<option value="">Mitarbeiter wählen...</option>'+state.mitarbeiter.map(m=>`<option value="${m.id}">${fxEsc(m.vorname)} ${fxEsc(m.nachname)} (${fxEsc(m.rolle)})</option>`).join('');
+  if(ms)ms.innerHTML='<option value="">Mitarbeiter wählen...</option>'+state.mitarbeiter.map(m=>`<option value="${fxEsc(m.id)}">${fxEsc(m.vorname)} ${fxEsc(m.nachname)} (${fxEsc(m.rolle)})</option>`).join('');
 }
 
 // BAUSTELLE
@@ -2792,7 +2796,8 @@ function arbeitszeitManuell(){
 }
 
 function arbeitszeitAnpassen(delta){
-  const elapsed=(Date.now()-state.timerStart)/3600000;
+  const bis=(state._pausiert&&state._pausedAt)?state._pausedAt:Date.now(); // v7.9.4
+  const elapsed=Math.max(0,(bis-state.timerStart)/3600000);
   const current=arbeitszeitManuellWert!==null?arbeitszeitManuellWert:elapsed;
   const neu=Math.max(0,Math.round((current+delta)*4)/4);
   arbeitszeitManuellWert=neu;
@@ -3055,7 +3060,7 @@ function terminBearbeiten(id){
   const modal=document.createElement('div');
   modal.id='termin-edit-modal';
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:20000;overflow-y:auto;padding:16px;display:flex;align-items:center;justify-content:center;';
-  const kundenOptionen=state.kunden.map(k=>`<option value="${k.id}" ${(t.kunde===kundeAnzeigeName(k)||t.kunde===k.vorname+' '+k.nachname)?'selected':''}>${fxEsc(kundeAnzeigeName(k))}</option>`).join('');
+  const kundenOptionen=state.kunden.map(k=>`<option value="${fxEsc(k.id)}" ${(t.kunde===kundeAnzeigeName(k)||t.kunde===k.vorname+' '+k.nachname)?'selected':''}>${fxEsc(kundeAnzeigeName(k))}</option>`).join('');
   modal.innerHTML=`<div style="background:var(--surface);border-radius:16px;width:100%;max-width:500px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
     <div style="background:var(--accent);color:var(--on-accent);padding:14px 16px;display:flex;justify-content:space-between;align-items:center;">
       <div style="font-weight:700;">✏️ Termin bearbeiten</div>
@@ -4014,6 +4019,12 @@ function maAuftraegeRendern(){
     .sort((a,b)=>{
       if(a.warteschlange&&!b.warteschlange) return 1;
       if(!a.warteschlange&&b.warteschlange) return -1;
+      // v7.9.4: geplante Auftraege (Zukunft) nie als "aktueller Auftrag" oben, untereinander nach Datum
+      const ga=a.status==='geplant', gb=b.status==='geplant';
+      if(ga!==gb) return ga?1:-1;
+      if(ga&&gb) return (a.datumRaw||'').localeCompare(b.datumRaw||'')||(a.geplantUhrzeit||'').localeCompare(b.geplantUhrzeit||'');
+      if(a.status==='in_bearbeitung'&&b.status!=='in_bearbeitung') return -1;
+      if(b.status==='in_bearbeitung'&&a.status!=='in_bearbeitung') return 1;
       return (a.reihenfolge||99)-(b.reihenfolge||99)||(a.geplantUhrzeit||'').localeCompare(b.geplantUhrzeit||'');
     });
 
@@ -4068,8 +4079,8 @@ function maAuftraegeRendern(){
         ${a.geplantUhrzeit?`<div style="font-size:20px;font-weight:900;color:var(--accent);margin-bottom:4px;">⏰ ${a.geplantUhrzeit} Uhr</div>`:''}
         <div style="font-size:18px;font-weight:800;color:var(--text);">${a.art}</div>
         <div style="font-size:13px;color:var(--text2);margin-top:2px;">${a.nr} · ${a.datum}</div>
-        ${a.beschreibung?`<div style="font-size:13px;color:var(--text);margin-top:6px;padding:8px;background:var(--surface2);border-radius:8px;">${a.beschreibung}</div>`:''}
-        ${a.maHinweis?`<div style="font-size:13px;color:var(--amber);margin-top:6px;padding:8px;background:var(--amber-bg);border-radius:8px;">⚠️ ${a.maHinweis}</div>`:''}
+        ${a.beschreibung?`<div style="font-size:13px;color:var(--text);margin-top:6px;padding:8px;background:var(--surface2);border-radius:8px;">${fxEsc(a.beschreibung)}</div>`:''}
+        ${a.maHinweis?`<div style="font-size:13px;color:var(--amber);margin-top:6px;padding:8px;background:var(--amber-bg);border-radius:8px;">⚠️ ${fxEsc(a.maHinweis)}</div>`:''}
       </div>
 
       ${eo?`<!-- v7.7: Einsatzort -->
@@ -4084,12 +4095,12 @@ function maAuftraegeRendern(){
       <div style="background:var(--surface2);border-radius:var(--radius-lg);padding:14px;margin-bottom:14px;">
         <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">👤 Kunde${eo?' · Rechnungsadresse':''}</div>
         <div style="font-size:17px;font-weight:800;color:var(--text);margin-bottom:4px;">${lgEsc(kundeAnzeigeName(k))}</div>
-        ${k.strasse?`<div style="font-size:14px;color:var(--text);font-weight:600;">${k.strasse}</div>`:''}
-        ${k.plz||k.ort?`<div style="font-size:14px;color:var(--text);">${k.plz||''} ${k.ort||''}</div>`:''}
-        ${k.objekt?`<div style="font-size:12px;color:var(--text2);margin-top:4px;">📍 ${k.objekt}</div>`:''}
-        ${k.tel?`<div style="margin-top:10px;"><a href="tel:${k.tel}" style="display:flex;align-items:center;gap:8px;padding:11px 14px;background:var(--green);color:#fff;border-radius:var(--radius);font-weight:700;font-size:14px;text-decoration:none;">📞 ${k.tel} – Anrufen</a></div>`:''}
-        ${k.email?`<div style="font-size:12px;color:var(--text2);margin-top:6px;">✉️ ${k.email}</div>`:''}
-        ${k.notizen?`<div style="font-size:12px;color:var(--text2);margin-top:6px;padding:6px 8px;background:var(--surface);border-radius:6px;">📌 ${k.notizen}</div>`:''}
+        ${k.strasse?`<div style="font-size:14px;color:var(--text);font-weight:600;">${fxEsc(k.strasse)}</div>`:''}
+        ${k.plz||k.ort?`<div style="font-size:14px;color:var(--text);">${fxEsc(k.plz||'')} ${fxEsc(k.ort||'')}</div>`:''}
+        ${k.objekt?`<div style="font-size:12px;color:var(--text2);margin-top:4px;">📍 ${fxEsc(k.objekt)}</div>`:''}
+        ${k.tel?`<div style="margin-top:10px;"><a href="tel:${fxEsc(String(k.tel).replace(/[^0-9+]/g,''))}" style="display:flex;align-items:center;gap:8px;padding:11px 14px;background:var(--green);color:#fff;border-radius:var(--radius);font-weight:700;font-size:14px;text-decoration:none;">📞 ${fxEsc(k.tel)} – Anrufen</a></div>`:''}
+        ${k.email?`<div style="font-size:12px;color:var(--text2);margin-top:6px;">✉️ ${fxEsc(k.email)}</div>`:''}
+        ${k.notizen?`<div style="font-size:12px;color:var(--text2);margin-top:6px;padding:6px 8px;background:var(--surface);border-radius:6px;">📌 ${fxEsc(k.notizen)}</div>`:''}
       </div>
 
       <!-- Aktions-Buttons (nur wenn nicht Warteschlange oder gestartet) -->
@@ -4151,19 +4162,19 @@ function maAuftraegeRendern(){
               <input id="ma-mat-menge-${a.id}" placeholder="Menge" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:14px;">
               <button onclick="maMatHinzu(${a.id})" style="padding:8px 12px;background:var(--accent);color:var(--on-accent);border:none;border-radius:var(--radius);cursor:pointer;font-weight:700;">+</button>
             </div>
-            <div id="ma-mat-liste-${a.id}">${a.materialien&&a.materialien.length?a.materialien.map((m,i)=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:13px;"><span>${m.name}</span><span>${m.menge} <button onclick="maMatLoeschen(${a.id},${i})" style="background:none;border:none;color:var(--red2);cursor:pointer;font-size:12px;">✕</button></span></div>`).join(''):''}</div>
+            <div id="ma-mat-liste-${a.id}">${a.materialien&&a.materialien.length?a.materialien.map((m,i)=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:13px;"><span>${fxEsc(m.name)}</span><span>${fxEsc(m.menge)} <button onclick="maMatLoeschen(${a.id},${i})" style="background:none;border:none;color:var(--red2);cursor:pointer;font-size:12px;">✕</button></span></div>`).join(''):''}</div>
           </div>
 
           <!-- DOKUMENTATION -->
           <div class="form-group" style="margin-bottom:10px;">
             <label>Dokumentation</label>
-            <textarea id="ma-doku-${a.id}" style="min-height:70px;" placeholder="Ausgeführte Arbeiten...">${a.doku||''}</textarea>
+            <textarea id="ma-doku-${a.id}" style="min-height:70px;" placeholder="Ausgeführte Arbeiten..." oninput="maDokuEntwurf(${a.id},this.value)">${fxEsc(a.doku||'')}</textarea>
           </div>
 
           <!-- UNTERSCHRIFT + ABSCHLIESSEN -->
           <div style="margin-bottom:8px;">
             <label style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;">Name des Unterzeichners</label>
-            <input id="ma-signer-${a.id}" type="text" value="${(a.signerName||a.kunde.vorname+' '+a.kunde.nachname).replace(/"/g,'&quot;')}" placeholder="Name des Unterzeichners" onchange="maSignerSpeichern(${a.id},this.value)" style="width:100%;margin-top:4px;padding:10px 12px;border-radius:var(--radius);border:1.5px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;">
+            <input id="ma-signer-${a.id}" type="text" value="${fxEsc(a.signerName||fxKundeName(a.kunde)||a.kunde.firma||'')}" placeholder="Name des Unterzeichners" onchange="maSignerSpeichern(${a.id},this.value)" style="width:100%;margin-top:4px;padding:10px 12px;border-radius:var(--radius);border:1.5px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;">
           </div>
           <button onclick="maUnterschriftStarten(${a.id})" style="padding:13px;background:var(--surface2);color:var(--text);border:1.5px solid var(--border);border-radius:var(--radius);font-weight:700;font-size:14px;cursor:pointer;width:100%;margin-bottom:8px;">✍️ Kundenunterschrift</button>
           <div id="ma-sig-status-${a.id}" style="display:${a.sigData?'block':'none'};color:var(--green2);font-size:13px;text-align:center;margin-bottom:8px;font-weight:700;">✓ Unterschrift vorhanden</div>
@@ -4620,7 +4631,18 @@ function maSignerSpeichern(auftragId, name){
   const a = state.auftraege.find(x=>x.id===auftragId);
   if(!a) return;
   a.signerName = name;
+  save(); // v7.9.4: sonst nach App-Neustart weg
 }
+// v7.9.4: Doku-Text laufend sichern (iOS/Android beenden die App im Hintergrund, z.B. beim Fotografieren)
+let _maDokuTimer = null;
+function maDokuEntwurf(auftragId, text){
+  const a = state.auftraege.find(x=>x.id===auftragId);
+  if(!a) return;
+  a.doku = text;
+  if(_maDokuTimer) clearTimeout(_maDokuTimer);
+  _maDokuTimer = setTimeout(function(){ _maDokuTimer=null; save(); }, 3000);
+}
+document.addEventListener('visibilitychange', function(){ if(document.hidden && _maDokuTimer){ clearTimeout(_maDokuTimer); _maDokuTimer=null; save(); } });
 
 function maZeitSpeichern(auftragId, typ, val){
   const a = state.auftraege.find(x=>x.id===auftragId);
@@ -4724,7 +4746,9 @@ function maFotoAufnehmen(auftragId, quelle){
   
   document.body.appendChild(input);
   input.click();
-  setTimeout(()=>input.remove(), 5000);
+  // v7.9.4: Feld erst nach der Auswahl entfernen (Kamera kann laenger als 5 s offen sein)
+  input.addEventListener('change', ()=>setTimeout(()=>input.remove(), 60000), {once:true});
+  setTimeout(()=>{ if(input.isConnected && !(input.files&&input.files.length)) input.remove(); }, 600000);
 }
 
 // ══════════════════════════════════════════
@@ -4807,7 +4831,7 @@ function sendePushAnMitarbeiter(auftrag, mitarbeiter){
   if(!('Notification' in window)||Notification.permission!=='granted')return;
   const k=auftrag.kunde;
   const titel=`📋 Neuer Auftrag: ${auftrag.art}`;
-  const body=`${auftrag.geplantUhrzeit?'⏰ '+auftrag.geplantUhrzeit+' Uhr – ':''}${k.vorname} ${k.nachname}, ${k.strasse||''} ${k.ort||''}`;
+  const body=`${auftrag.geplantUhrzeit?'⏰ '+auftrag.geplantUhrzeit+' Uhr – ':''}${kundeAnzeigeName(k)}, ${k.strasse||''} ${k.ort||''}`;
   try{
     new Notification(titel,{
       body,
@@ -4828,7 +4852,7 @@ function sendePushBenachrichtigung(auftrag){
   if(!('Notification' in window)||Notification.permission!=='granted')return;
   const k=auftrag.kunde;
   const titel=`✅ Auftrag ${auftrag.nr} abgeschlossen`;
-  const body=`${auftrag.abgeschlossenVon||'Mitarbeiter'} hat "${auftrag.art}" bei ${k.vorname} ${k.nachname} um ${auftrag.abgeschlossenUm} Uhr abgeschlossen.`;
+  const body=`${auftrag.abgeschlossenVon||'Mitarbeiter'} hat "${auftrag.art}" bei ${kundeAnzeigeName(k)} um ${auftrag.abgeschlossenUm} Uhr abgeschlossen.`;
   try{
     new Notification(titel,{body,icon:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🦊</text></svg>'});
   }catch(e){}
@@ -4865,12 +4889,12 @@ function auftragZuweisen(id){
       <!-- Uhrzeit festlegen -->
       <div style="margin-bottom:14px;">
         <label style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;display:block;margin-bottom:6px;">⏰ Geplante Uhrzeit</label>
-        <input type="time" id="zuweisen-uhrzeit" value="${a.geplantUhrzeit||''}" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);font-size:16px;">
+        <input type="time" id="zuweisen-uhrzeit" value="${fxEsc(a.geplantUhrzeit)}" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);font-size:16px;">
       </div>
       <!-- Notiz für Mitarbeiter -->
       <div style="margin-bottom:14px;">
         <label style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;display:block;margin-bottom:6px;">📝 Hinweis für Mitarbeiter</label>
-        <textarea id="zuweisen-hinweis" placeholder="z.B. Klingel defekt, bitte anrufen..." style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);font-size:14px;min-height:55px;font-family:inherit;">${a.maHinweis||''}</textarea>
+        <textarea id="zuweisen-hinweis" placeholder="z.B. Klingel defekt, bitte anrufen..." style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);font-size:14px;min-height:55px;font-family:inherit;">${fxEsc(a.maHinweis)}</textarea>
       </div>
 
       <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:8px;">Mitarbeiter wählen</div>
@@ -5195,7 +5219,7 @@ function updateRechnungenSelect(){
   const sel=document.getElementById('r-auftrag');if(!sel)return;
   // v7.9.4: nur erledigte, noch nicht abgerechnete Auftraege; mit Firmenname
   const offene=state.auftraege.filter(a=>a.status==='abgeschlossen');
-  sel.innerHTML='<option value="">Auftrag wählen...</option>'+offene.map(a=>`<option value="${a.id}">${fxEsc(a.nr)} – ${fxEsc(kundeAnzeigeName(a.kunde))} (${fxEsc(a.art)})</option>`).join('');
+  sel.innerHTML='<option value="">Auftrag wählen...</option>'+offene.map(a=>`<option value="${fxEsc(a.id)}">${fxEsc(a.nr)} – ${fxEsc(kundeAnzeigeName(a.kunde))} (${fxEsc(a.art)})</option>`).join('');
 }
 
 
@@ -5319,7 +5343,7 @@ function auftragAnnehmenOeffnen(){
   // Bestehende Kunden laden
   const sel = document.getElementById('aa-kunde-existing');
   sel.innerHTML = '<option value="">— Neuen Kunden anlegen —</option>' +
-    state.kunden.map(k=>`<option value="${k.id}">${fxEsc(kundeAnzeigeName(k))} – ${fxEsc(k.strasse||'')} ${fxEsc(k.ort||'')}</option>`).join('');
+    state.kunden.map(k=>`<option value="${fxEsc(k.id)}">${fxEsc(kundeAnzeigeName(k))} – ${fxEsc(k.strasse||'')} ${fxEsc(k.ort||'')}</option>`).join('');
 
   // Mitarbeiter laden (inkl. Admin)
   const maSel = document.getElementById('aa-mitarbeiter');
@@ -5537,6 +5561,7 @@ function annehmenKundeAuswaehlen(id){
   document.getElementById('an-kunde-felder').style.display='block';
   
   const felder = {
+    'an-firma': k.firma||'',
     'an-vorname': k.vorname||'',
     'an-nachname': k.nachname||'',
     'an-tel': k.tel||'',
@@ -5593,7 +5618,7 @@ function annehmenAuswahlAufheben(suchfeldLeeren){
   if(suche && suchfeldLeeren) suche.value='';
   const erg = document.getElementById('an-kunde-ergebnisse');
   if(erg && suchfeldLeeren) erg.style.display='none';
-  ['an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt'].forEach(id=>{
+  ['an-firma','an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt'].forEach(id=>{
     const el=document.getElementById(id);if(el)el.value='';
   });
   const btn = document.getElementById('an-neukunde-btn');
@@ -5609,7 +5634,7 @@ function kundeAnzeigeName(k){
   if(k.firma) return person ? k.firma+' – '+person : k.firma;
   return person || 'Kunde';
 }
-const ANNEHMEN_KUNDENFELDER=['an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt'];
+const ANNEHMEN_KUNDENFELDER=['an-firma','an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt'];
 function annehmenKundenfelderSperren(gesperrt){
   ANNEHMEN_KUNDENFELDER.forEach(id=>{
     const el=document.getElementById(id);if(!el)return;
@@ -5697,7 +5722,7 @@ function annehmenMitarbeiterUpdate(){
   if(!maSel) return;
   const zugaenge = (state.zugaenge||[]);
   maSel.innerHTML = '<option value="">— Noch nicht zuweisen —</option>' +
-    zugaenge.map(z=>`<option value="${z.id}">${z.name}${z.rolle==='chef'?' 👑 (ich selbst)':' ('+z.rolle+')'}</option>`).join('');
+    zugaenge.map(z=>`<option value="${fxEsc(z.id)}">${z.name}${z.rolle==='chef'?' 👑 (ich selbst)':' ('+z.rolle+')'}</option>`).join('');
 }
 
 function annehmenInit(){
@@ -5716,7 +5741,7 @@ function annehmenInit(){
   if(maSel){
     const zugaenge = (state.zugaenge||[]);
     maSel.innerHTML = '<option value="">— Noch nicht zuweisen —</option>' +
-      zugaenge.map(z=>`<option value="${z.id}">${z.name}${z.rolle==='chef'?' 👑 (ich selbst)':' ('+z.rolle+')'}</option>`).join('');
+      zugaenge.map(z=>`<option value="${fxEsc(z.id)}">${z.name}${z.rolle==='chef'?' 👑 (ich selbst)':' ('+z.rolle+')'}</option>`).join('');
     // Falls Mitarbeiter eingeloggt ist, vorauswählen
     if(aktiverBenutzer && aktiverBenutzer.rolle==='chef'){
       // Chef bleibt bei Auswahl
@@ -5725,7 +5750,7 @@ function annehmenInit(){
 
   // Felder nur leeren wenn KEIN Kunde ausgewählt ist
   if(!window._annehmenKundeId){
-    ['an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt','an-beschreibung','an-intern'].forEach(id=>{
+    ['an-firma','an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt','an-beschreibung','an-intern'].forEach(id=>{
       const el=document.getElementById(id);if(el)el.value='';
     });
   }
@@ -5741,6 +5766,7 @@ function annehmenKundeWaehlen(id){
   if(!id) return;
   const k = state.kunden.find(x=>x.id==id);
   if(!k) return;
+  const fF=document.getElementById('an-firma'); if(fF) fF.value = k.firma||'';
   document.getElementById('an-vorname').value = k.vorname||'';
   document.getElementById('an-nachname').value = k.nachname||'';
   document.getElementById('an-tel').value = k.tel||'';
@@ -5763,7 +5789,8 @@ function annehmenSpeichern(option){
     kunde = state.kunden.find(k=>k.id==kundeId);
     if(!kunde){alert('Der gewählte Kunde ist nicht mehr vorhanden (evtl. auf einem anderen Gerät gelöscht). Bitte Kunden neu auswählen.');return;}
   } else {
-    if(!vorname||!nachname){alert('Bitte Vor- und Nachname eingeben!');return;}
+    const firmaNeu=(document.getElementById('an-firma')||{}).value||'';
+    if(!firmaNeu.trim() && (!vorname||!nachname)){alert('Bitte Vor- und Nachname (oder eine Firma) eingeben!');return;}
   }
 
   // v7.6: Einsatzort ermitteln (Kopie im Auftrag, a.kunde bleibt Rechnungsempfaenger)
@@ -5791,6 +5818,7 @@ function annehmenSpeichern(option){
     kunde = {
       id:Date.now(),
       vorname, nachname,
+      firma:((document.getElementById('an-firma')||{}).value||'').trim(), // v7.9.4
       tel:document.getElementById('an-tel').value.trim(),
       email:document.getElementById('an-email').value.trim(),
       strasse:document.getElementById('an-strasse').value.trim(),
@@ -5894,10 +5922,10 @@ function annehmenSpeichern(option){
 function annehmenKalenderEintrag(auftrag, kunde, datumRaw, uhrzeit, beschreibung){
   state.termine.push({
     id: Date.now()+2,
-    titel: auftrag.art + ' – ' + kunde.vorname + ' ' + kunde.nachname,
+    titel: auftrag.art + ' – ' + kundeAnzeigeName(kunde),
     datum: datumRaw,
     zeit: uhrzeit||'08:00',
-    kunde: kunde.vorname+' '+kunde.nachname,
+    kunde: kundeAnzeigeName(kunde),
     kundeId: kunde.id,
     notiz: beschreibung||'',
     auftragId: auftrag.id
@@ -6081,7 +6109,8 @@ function auftraegeSuchen(q){
   const f=q.toLowerCase();
   const filtered=state.auftraege.filter(a=>!a.inWarteschlange&&(
     a.nr.toLowerCase().includes(f)||
-    (a.kunde.vorname+' '+a.kunde.nachname).toLowerCase().includes(f)||
+    kundeAnzeigeName(a.kunde).toLowerCase().includes(f)||
+    ((a.kunde&&a.kunde.ort)||'').toLowerCase().includes(f)||
     a.art.toLowerCase().includes(f)||
     (a.beschreibung||'').toLowerCase().includes(f)||
     a.datum.includes(f))
@@ -6101,22 +6130,25 @@ function auftragBearbeiten(id){
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:20001;overflow-y:auto;padding:16px;';
   modal.innerHTML=`<div style="background:var(--surface);border-radius:16px;max-width:560px;margin:0 auto;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
     <div style="background:var(--accent);color:var(--on-accent);padding:14px 16px;display:flex;justify-content:space-between;align-items:center;">
-      <div style="font-weight:700;">✏️ Auftrag bearbeiten – ${a.nr}</div>
+      <div style="font-weight:700;">✏️ Auftrag bearbeiten – ${fxEsc(a.nr)}</div>
       <button onclick="document.getElementById('auftrag-edit-modal').remove()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:16px;">✕</button>
     </div>
     <div style="padding:16px;display:flex;flex-direction:column;gap:10px;">
       <div class="form-row">
-        <div class="form-group"><label>Arbeitszeit (Std.)</label><input id="ae-arbeit" type="number" step="0.25" value="${a.arbeitStd}"></div>
-        <div class="form-group"><label>Fahrtzeit (Std.)</label><input id="ae-fahrt" type="number" step="0.25" value="${a.fahrtStd}"></div>
+        <div class="form-group"><label>Arbeitszeit (Std.)</label><input id="ae-arbeit" type="number" step="0.25" value="${fxEsc(a.arbeitStd)}"></div>
+        <div class="form-group"><label>Fahrtzeit (Std.)</label><input id="ae-fahrt" type="number" step="0.25" value="${fxEsc(a.fahrtStd)}"></div>
       </div>
       <div class="form-group"><label>Art der Arbeit</label>
         <select id="ae-art">
           ${['Kanalreinigung','Rohrreinigung','HD-Spülung','Wartung','Notdienst','Inspektion','Sonstiges'].map(o=>`<option ${a.art===o?'selected':''}>${o}</option>`).join('')}
         </select>
       </div>
-      <div class="form-group"><label>Beschreibung</label><textarea id="ae-beschreibung" style="min-height:60px;">${a.beschreibung||''}</textarea></div>
-      <div class="form-group"><label>Dokumentation</label><textarea id="ae-doku" style="min-height:80px;">${a.doku||''}</textarea></div>
-      <div class="form-group"><label>Datum</label><input id="ae-datum" type="text" value="${a.datum}"></div>
+      <div class="form-group"><label>Beschreibung</label><textarea id="ae-beschreibung" style="min-height:60px;">${fxEsc(a.beschreibung)}</textarea></div>
+      <div class="form-group"><label>Dokumentation</label><textarea id="ae-doku" style="min-height:80px;">${fxEsc(a.doku)}</textarea></div>
+      <div class="form-row">
+        <div class="form-group"><label>Datum</label><input id="ae-datum" type="date" value="${fxEsc(_auftragDatumISO(a))}"></div>
+        <div class="form-group"><label>Uhrzeit</label><input id="ae-uhrzeit" type="time" value="${fxEsc(a.geplantUhrzeit||'')}"></div>
+      </div>
       <button class="btn primary" onclick="auftragSpeichernEdit(${id})">✓ Änderungen speichern</button>
     </div>
   </div>`;
@@ -6124,6 +6156,12 @@ function auftragBearbeiten(id){
   modal.addEventListener('click',e=>{if(e.target===modal)modal.remove();});
 }
 
+function _auftragDatumISO(a){
+  if(a.datumRaw && /^\d{4}-\d{2}-\d{2}$/.test(a.datumRaw)) return a.datumRaw;
+  const p=String(a.datum||'').split('.');
+  if(p.length===3 && p[2].length===4) return p[2]+'-'+p[1].padStart(2,'0')+'-'+p[0].padStart(2,'0');
+  return '';
+}
 function auftragSpeichernEdit(id){
   const a=state.auftraege.find(x=>x.id===id);if(!a)return;
   const arbeit=parseFloat(document.getElementById('ae-arbeit').value)||0;
@@ -6134,8 +6172,22 @@ function auftragSpeichernEdit(id){
   a.art=document.getElementById('ae-art').value;
   a.beschreibung=document.getElementById('ae-beschreibung').value.trim();
   a.doku=document.getElementById('ae-doku').value.trim();
-  a.datum=document.getElementById('ae-datum').value.trim();
+  // v7.9.4: Datum als Kalenderfeld; geplant/offen und Kalendertermin passen sich an
+  const neuISO=document.getElementById('ae-datum').value;
+  const neuZeit=document.getElementById('ae-uhrzeit').value;
+  const altISO=_auftragDatumISO(a);
+  if(neuISO && neuISO!==altISO){
+    const [yy,mm,dd]=neuISO.split('-');
+    a.datum=parseInt(dd,10)+'.'+parseInt(mm,10)+'.'+yy;
+    a.datumRaw=neuISO;
+    const heute=_heuteISO();
+    if(a.status==='geplant' && neuISO<=heute) statusSetzen(a,'offen');
+    else if(a.status==='offen' && !a.maGestartet && neuISO>heute) statusSetzen(a,'geplant');
+  }
+  if(neuZeit!==(a.geplantUhrzeit||'')){ a.geplantUhrzeit=neuZeit; if(neuZeit) a.uhrzeit=neuZeit; }
+  (state.termine||[]).filter(t=>t.auftragId!=null&&t.auftragId==a.id).forEach(t=>{ if(neuISO) t.datum=neuISO; if(neuZeit) t.zeit=neuZeit; });
   document.getElementById('auftrag-edit-modal').remove();
+  try{ renderCal(); renderAlleTermine(); if(typeof renderGeplant==='function') renderGeplant(); }catch(e){}
   const pm=document.getElementById('protokoll-modal');if(pm)pm.remove();
   renderAuftraege();updateDashboard();save();
   alert('✓ Auftrag aktualisiert!');
@@ -6157,22 +6209,22 @@ function kundeBearbeiten(id){
     </div>
     <div style="padding:16px;display:flex;flex-direction:column;gap:10px;">
       <div class="form-row">
-        <div class="form-group"><label>Vorname</label><input id="ke-vorname" value="${k.vorname}"></div>
-        <div class="form-group"><label>Nachname</label><input id="ke-nachname" value="${k.nachname}"></div>
+        <div class="form-group"><label>Vorname</label><input id="ke-vorname" value="${fxEsc(k.vorname)}"></div>
+        <div class="form-group"><label>Nachname</label><input id="ke-nachname" value="${fxEsc(k.nachname)}"></div>
       </div>
       <div class="form-row full">
-        <div class="form-group"><label>Firmenname <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input id="ke-firma" value="${k.firma||''}" placeholder="z.B. Hausverwaltung Muster GmbH"></div>
+        <div class="form-group"><label>Firmenname <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input id="ke-firma" value="${fxEsc(k.firma)}" placeholder="z.B. Hausverwaltung Muster GmbH"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>Telefon</label><input id="ke-tel" value="${k.tel||''}"></div>
-        <div class="form-group"><label>E-Mail</label><input id="ke-email" value="${k.email||''}"></div>
+        <div class="form-group"><label>Telefon</label><input id="ke-tel" value="${fxEsc(k.tel)}"></div>
+        <div class="form-group"><label>E-Mail</label><input id="ke-email" value="${fxEsc(k.email)}"></div>
       </div>
-      <div class="form-group"><label>Straße + Nr.</label><input id="ke-strasse" value="${k.strasse||''}"></div>
+      <div class="form-group"><label>Straße + Nr.</label><input id="ke-strasse" value="${fxEsc(k.strasse)}"></div>
       <div class="form-row">
-        <div class="form-group"><label>PLZ</label><input id="ke-plz" value="${k.plz||''}"></div>
-        <div class="form-group"><label>Ort</label><input id="ke-ort" value="${k.ort||''}"></div>
+        <div class="form-group"><label>PLZ</label><input id="ke-plz" value="${fxEsc(k.plz)}"></div>
+        <div class="form-group"><label>Ort</label><input id="ke-ort" value="${fxEsc(k.ort)}"></div>
       </div>
-      <div class="form-group"><label>Objekt / Liegenschaft</label><input id="ke-objekt" value="${k.objekt||''}"></div>
+      <div class="form-group"><label>Objekt / Liegenschaft</label><input id="ke-objekt" value="${fxEsc(k.objekt)}"></div>
       <div class="form-group"><label>Wartungsvertrag</label>
         <select id="ke-wartung">
           <option value="" ${!k.wartung?'selected':''}>Kein Wartungsvertrag</option>
@@ -6180,7 +6232,7 @@ function kundeBearbeiten(id){
           <option value="halbjaehrlich" ${k.wartung==='halbjaehrlich'?'selected':''}>Halbjährlich</option>
         </select>
       </div>
-      <div class="form-group"><label>Notizen</label><textarea id="ke-notizen" style="min-height:60px;">${k.notizen||''}</textarea></div>
+      <div class="form-group"><label>Notizen</label><textarea id="ke-notizen" style="min-height:60px;">${fxEsc(k.notizen)}</textarea></div>
       <button class="btn primary" onclick="kundeSpeichernEdit(${id})">✓ Änderungen speichern</button>
     </div>
   </div>`;
@@ -6218,8 +6270,14 @@ function pruefeWartungsvertraege(){
     // Letzten Auftrag für diesen Kunden finden
     const auftraege=state.auftraege.filter(a=>a.kunde&&a.kunde.id==k.id);
     if(!auftraege.length)return;
-    const letzter=auftraege[0]; // unshift → neuester zuerst
-    const letzterDatum=new Date(letzter.datum.split('.').reverse().join('-'));
+    // v7.9.4: neuester Auftrag nach Datum (Reihenfolge nach Sync nicht garantiert)
+    const mitDatum=auftraege.map(a=>({a,d:_auftragDatumISO(a)})).filter(x=>x.d).sort((x,y)=>y.d.localeCompare(x.d));
+    if(!mitDatum.length)return;
+    // schon etwas geplant/offen oder ein Termin in der Zukunft -> keine Erinnerung
+    const heuteISO=_heuteISO();
+    if(auftraege.some(a=>['geplant','offen','in_bearbeitung','warteschlange'].includes(a.status))) return;
+    if((state.termine||[]).some(t=>t.kundeId==k.id && (t.datum||'')>=heuteISO)) return;
+    const letzterDatum=new Date(mitDatum[0].d+'T00:00:00');
     const monate=k.wartung==='jaehrlich'?12:6;
     const faelligAb=new Date(letzterDatum);
     faelligAb.setMonth(faelligAb.getMonth()+monate);
@@ -6244,22 +6302,28 @@ function pruefeWartungsvertraege(){
 // ══════════════════════════════════════════
 function auftraegeExportCSV(){
   if(!state.auftraege.length){alert('Keine Aufträge vorhanden.');return;}
-  const header=['Nr','Datum','Uhrzeit','Kunde','Straße','PLZ','Ort','Leistung','Beschreibung','Arbeitszeit Std','Fahrtzeit Std','Gesamtzeit Std','Material','Dokumentation','Unterschrift'];
-  const rows=state.auftraege.map(a=>[
+  // v7.9.4: mit Firma, Einsatzort, Status und Mitarbeiter
+  const header=['Nr','Datum','Uhrzeit','Firma','Kunde','Straße','PLZ','Ort','Einsatzort','Leistung','Beschreibung','Status','Mitarbeiter','Arbeitszeit Std','Fahrtzeit Std','Gesamtzeit Std','Material','Dokumentation','Unterschrift'];
+  const rows=state.auftraege.map(a=>{
+    const k=a.kunde||{}, eo=a.einsatzort;
+    const ma=a.abgeschlossenVon||((state.zugaenge||[]).find(z=>z.id==a.zugewiesenAn)||{}).name||(a.mitarb?((a.mitarb.vorname||'')+' '+(a.mitarb.nachname||'')).trim():'');
+    return [
     a.nr, a.datum, a.uhrzeit||'',
-    a.kunde.vorname+' '+a.kunde.nachname,
-    a.kunde.strasse||'', a.kunde.plz||'', a.kunde.ort||'',
-    a.art, (a.beschreibung||'').replace(/"/g,'""'),
-    a.arbeitStd, a.fahrtStd, a.gesamtStd,
+    k.firma||'', fxKundeName(k),
+    k.strasse||'', k.plz||'', k.ort||'',
+    eo?[eo.bezeichnung,eo.strasse,((eo.plz||'')+' '+(eo.ort||'')).trim()].filter(Boolean).join(', '):'',
+    a.art, a.beschreibung||'',
+    a.statusLabel||STATUS_LABEL[a.status]||a.status||'', ma,
+    String(a.arbeitStd||'').replace('.',','), String(a.fahrtStd||'').replace('.',','), String(a.gesamtStd||'').replace('.',','),
     a.materialien&&a.materialien.length?a.materialien.map(m=>m.name+' '+m.menge).join(' | '):'',
-    (a.doku||'').replace(/"/g,'""'),
+    a.doku||'',
     a.signiert?'Ja':'Nein'
-  ].map(v=>`"${v}"`).join(';'));
+  ].map(v=>`"${String(v==null?'':v).replace(/"/g,'""')}"`).join(';');});
   const csv='\uFEFF'+header.map(h=>`"${h}"`).join(';')+'\n'+rows.join('\n');
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
-  a.href=url;a.download='Auftraege_Fuchs_'+new Date().toISOString().split('T')[0]+'.csv';
+  a.href=url;a.download='Auftraege_Fuchs_'+_heuteISO()+'.csv';
   a.click();
   setTimeout(()=>URL.revokeObjectURL(url),5000);
 }
@@ -6553,15 +6617,19 @@ function backupExportieren(){
     auftraege: state.auftraege,
     termine: state.termine,
     auftragNr: state.auftragNr,
+    rechnungen: state.rechnungen||[],   // v7.9.4: fehlten bisher
+    rechnungNr: state.rechnungNr||1001,
+    zugaenge: state.zugaenge||[],
     settings: {...state.settings, logoData: undefined}, // Logo nicht im Backup (zu groß)
-    exportDatum: new Date().toISOString()
+    exportDatum: new Date().toISOString(),
+    version: APP_VERSION
   };
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'Fuchs_Backup_' + new Date().toISOString().split('T')[0] + '.json';
+  a.download = 'Fuchs_Backup_' + _heuteISO() + '.json';
   a.click();
   setTimeout(()=>URL.revokeObjectURL(url), 5000);
 }
@@ -6573,8 +6641,22 @@ function backupImportieren(input){
     try {
       const data = JSON.parse(e.target.result);
       if(!data.kunden||!data.auftraege){alert('❌ Ungültige Backup-Datei');return;}
-      if(!confirm(`Backup vom ${data.exportDatum?new Date(data.exportDatum).toLocaleDateString('de-DE'):'unbekannt'} laden? Aktuelle Daten werden überschrieben!`))return;
-      Object.assign(state, data);
+      if(!confirm(`Backup vom ${data.exportDatum?new Date(data.exportDatum).toLocaleDateString('de-DE'):'unbekannt'} laden?\n\nAlle Einträge aus dem Backup werden wiederhergestellt (auch auf den anderen Geräten). Einträge, die erst nach dem Backup angelegt wurden, bleiben erhalten.`))return;
+      // v7.9.4: Backup muss beim Zusammenfuehren gewinnen -> frische Zeitstempel, Loesch-Markierungen aufheben
+      const jetzt=Date.now();
+      if(!state.geloescht||typeof state.geloescht!=='object') state.geloescht={};
+      SYNC_LISTEN.forEach(l=>{
+        if(!Array.isArray(data[l])) return;
+        const tot=state.geloescht[l]||{};
+        const wieder=state.geloescht['wieder_'+l]=state.geloescht['wieder_'+l]||{};
+        data[l].forEach(r=>{ if(r&&r.id!=null){ r._u=jetzt; if(tot[String(r.id)]) wieder[String(r.id)]=jetzt; delete tot[String(r.id)]; if(l==='auftraege'&&r.statusZeit) r.statusZeit=jetzt; } });
+        const ids=new Set(data[l].map(r=>String(r&&r.id)));
+        state[l]=data[l].concat((state[l]||[]).filter(r=>r&&!ids.has(String(r.id))));
+      });
+      if(data.settings){ state.settings=Object.assign({}, state.settings, data.settings, {logoData:(state.settings||{}).logoData, _u:jetzt}); }
+      if(data.auftragNr) state.auftragNr=Math.max(state.auftragNr||0, data.auftragNr);
+      if(data.rechnungNr) state.rechnungNr=Math.max(state.rechnungNr||0, data.rechnungNr);
+      _hashesNeuSetzen();
       renderKunden(); renderMitarbeiter(); renderAuftraege(); updateDashboard(); ladeEinstellungen(); save();
       alert('✓ Backup erfolgreich geladen!');
     } catch(err){alert('❌ Fehler beim Laden: ' + err.message);}
@@ -6659,7 +6741,7 @@ function renderStatistiken(){
   const totalGesamt = af.reduce((s,a)=>s+(parseFloat(a.gesamtStd)||0),0);
   const mitSig = af.filter(a=>a.signiert).length;
   const statusCount = {};
-  af.forEach(a=>{const s=a.statusLabel||a.status||'Offen';statusCount[s]=(statusCount[s]||0)+1;});
+  af.forEach(a=>{const s=STATUS_LABEL[a.status]||a.statusLabel||a.status||'Offen';statusCount[s]=(statusCount[s]||0)+1;}); // v7.9.4
 
   el.innerHTML = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">'
     + '<div style="background:var(--metric-grad);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:4px;">Auftr\u00e4ge</div><div style="font-size:26px;font-weight:800;color:var(--accent);">'+af.length+'</div></div>'
@@ -6688,13 +6770,13 @@ function renderStatistiken(){
 
   // Top Kunden
   const kundenCount = {};
-  af.forEach(a=>{const n=a.kunde.vorname+' '+a.kunde.nachname;kundenCount[n]=(kundenCount[n]||0)+1;});
+  af.forEach(a=>{const n=kundeAnzeigeName(a.kunde);kundenCount[n]=(kundenCount[n]||0)+1;}); // v7.9.4: mit Firma
   const topKunden = Object.entries(kundenCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
   const el3 = document.getElementById('stats-kunden');
   if(el3){
     if(topKunden.length){
       el3.innerHTML = topKunden.map(([name,cnt],i) => {
-        return '<div class="list-item"><div style="display:flex;align-items:center;gap:10px;"><div style="width:28px;height:28px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:var(--accent);">'+(i+1)+'</div><div style="font-weight:600;">'+name+'</div></div><span class="badge">'+cnt+' Auftr.</span></div>';
+        return '<div class="list-item"><div style="display:flex;align-items:center;gap:10px;"><div style="width:28px;height:28px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:var(--accent);">'+(i+1)+'</div><div style="font-weight:600;">'+fxEsc(name)+'</div></div><span class="badge">'+cnt+' Auftr.</span></div>';
       }).join('');
     } else {
       el3.innerHTML = '<div class="empty">Keine Daten</div>';
