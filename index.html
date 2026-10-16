@@ -1660,7 +1660,10 @@ async function saveToSupabase(versuch){
     const checkRes = await fetch(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
       headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY}
     });
+    // v7.9.4: ohne gueltigen Cloud-Stand nichts schreiben (sonst wuerde blind ueberschrieben)
+    if(!checkRes.ok){ window._uploadAusstehend = true; updateSyncStatus(_cloudFehlerText(checkRes.status)); return false; }
     const existing = await checkRes.json();
+    if(!Array.isArray(existing)){ window._uploadAusstehend = true; updateSyncStatus('⚠️ Lokal gespeichert'); return false; }
     const remoteLastSaved = (existing && existing.length>0 && existing[0].data) ? existing[0].data._lastSaved : null;
 
     // v7.9: Cloud-Stand datensatzgenau einarbeiten. Nichts, was nur in der
@@ -1710,11 +1713,12 @@ async function saveToSupabase(versuch){
           );
           if(res.ok){
             const updated = await res.json().catch(()=>null);
-            if(Array.isArray(updated) && updated.length===0) konflikt = true;
-          } else {
-            res = null; // Fällt unten auf den normalen Weg zurück
+            if(!Array.isArray(updated) || updated.length===0) konflikt = true;
+          } else if(res.status===400){
+            res = null; // Filter vom Server nicht verstanden -> wie bisher normal schreiben
           }
-        }catch(e){ res = null; }
+          // v7.9.4: Fehler der bedingten Anfrage -> NICHT blind ueberschreiben, spaeter erneut versuchen
+        }catch(e){ res = { ok:false }; }
       }
 
       if (konflikt && versuch < 4) {
@@ -1722,6 +1726,7 @@ async function saveToSupabase(versuch){
         await new Promise(r=>setTimeout(r, 250 + Math.random()*400));
         return await saveToSupabase(versuch+1);
       }
+      if (konflikt) res = { ok:false }; // v7.9.4: nach 5 Versuchen nicht als "gespeichert" melden
 
       if (!res) {
         // Kein Vergleichswert vorhanden oder bedingte Anfrage nicht möglich -
@@ -1832,6 +1837,11 @@ function _pdfHtmlAufraeumen(liste){
 window._remoteTsBekannt = null;
 window._uploadAusstehend = false;
 let _pruefenLaeuft = false;
+function _cloudFehlerText(status){
+  if(status===402||status===429) return '⚠️ Cloud gesperrt (Kontingent) – lokal gespeichert';
+  if(status===401||status===403) return '⚠️ Cloud verweigert Zugriff – lokal gespeichert';
+  return '⚠️ Cloud-Fehler ' + status + ' – lokal gespeichert';
+}
 async function syncPruefen(){
   if(document.hidden || _pruefenLaeuft) return;
   _pruefenLaeuft = true;
@@ -1841,7 +1851,7 @@ async function syncPruefen(){
     const res = await fetch(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID + '&select=ts:data->_lastSaved', {
       headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY}
     });
-    if(!res.ok){ updateSyncStatus('⚠️ Offline'); return; }
+    if(!res.ok){ updateSyncStatus(_cloudFehlerText(res.status)); return; }
     const rows = await res.json();
     const ts = (rows && rows.length) ? String(rows[0].ts) : null;
     if(ts === null || ts !== window._remoteTsBekannt){
@@ -2061,6 +2071,8 @@ async function syncFromSupabase() {
     const res = await fetch(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
       headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY}
     });
+    // v7.9.4: Fehlerantwort (z.B. Sperre wegen Kontingent) nicht als "Bereit" anzeigen
+    if(!res.ok){ updateSyncStatus(_cloudFehlerText(res.status)); return; }
     const rows = await res.json();
     if (rows && rows.length > 0 && rows[0].data) {
       const remote = rows[0].data;
