@@ -4532,7 +4532,8 @@ function maUnterschriftStarten(auftragId){
       // Bestehende Unterschrift laden
       if(a.sigData){
         const img = new Image();
-        img.onload = ()=> ctx.drawImage(img, 0, 0, w, h);
+        // v7.9.4: Seitenverhaeltnis beibehalten (sonst nach erneutem Speichern verzerrt)
+        img.onload = ()=>{ const f=Math.min(w/img.width, h/img.height); const dw=img.width*f, dh=img.height*f; ctx.drawImage(img, (w-dw)/2, (h-dh)/2, dw, dh); };
         img.src = a.sigData;
       }
 
@@ -5108,8 +5109,11 @@ function rechnungErstellen(){
   const extraPreis=parseFloat(document.getElementById('r-extra-preis').value)||0;
   const arbeit=parseFloat(a.arbeitStd)||0;
   const fahrt=parseFloat(a.fahrtStd)||0;
-  const netto=arbeit*stundensatz+fahrt*(parseFloat(s.fahrsatz)||stundensatz)+anfahrt+extraPreis;
-  const brutto=netto*1.19;
+  // v7.9.4: jede Position auf Cent runden, MwSt. einmal gerundet -> Summe stimmt immer
+  const _c=v=>Math.round(v*100)/100;
+  const netto=_c(_c(arbeit*stundensatz)+_c(fahrt*(parseFloat(s.fahrsatz)||stundensatz))+_c(anfahrt)+_c(extraPreis));
+  const mwst=_c(netto*0.19);
+  const brutto=_c(netto+mwst);
   if(!state.rechnungen)state.rechnungen=[];
   if(!state.rechnungNr)state.rechnungNr=1001;
   const datum=new Date().toLocaleDateString('de-DE');
@@ -5213,7 +5217,7 @@ function rechnungPdfSpeichern(id){
     ${r.anfahrt?`<tr><td>Anfahrtspauschale</td><td></td><td></td><td style="text-align:right;">${r.anfahrt.toFixed(2)}</td></tr>`:''}
     ${r.extraText&&r.extraPreis?`<tr><td>${fxEsc(r.extraText)}</td><td></td><td></td><td style="text-align:right;">${r.extraPreis.toFixed(2)}</td></tr>`:''}
     <tr><td colspan="3" style="font-weight:700;border-top:2px solid var(--accent);">Netto</td><td style="text-align:right;font-weight:700;border-top:2px solid var(--accent);">${r.netto.toFixed(2)} €</td></tr>
-    <tr><td colspan="3">zzgl. 19% MwSt.</td><td style="text-align:right;">${(r.netto*0.19).toFixed(2)} €</td></tr>
+    <tr><td colspan="3">zzgl. 19% MwSt.</td><td style="text-align:right;">${(r.brutto-r.netto).toFixed(2)} €</td></tr>
     <tr><td colspan="3" class="total">BRUTTO GESAMT</td><td class="total" style="text-align:right;">${r.brutto.toFixed(2)} €</td></tr>
   </table>
 
