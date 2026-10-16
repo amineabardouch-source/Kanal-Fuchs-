@@ -1391,7 +1391,7 @@ let state = {
 };
 
 // ---- SUPABASE SYNC ----
-const APP_VERSION = 'v7.9.2';
+const APP_VERSION = 'v7.9.3';
 // Rangfolge der Auftrags-Status: ein Auftrag darf beim Sync (in beide
 // Richtungen) nie von einem höheren auf einen niedrigeren Rang zurückfallen.
 // Das verhindert, dass ein Gerät mit veraltetem Stand (z.B. weil es die
@@ -1423,7 +1423,7 @@ function _recInhalt(r){
   });
   // Unterschrift vorhanden ja/nein zaehlt als Aenderung - ausser bei archiviert/abgerechnet:
   // dort laedt die App die Unterschrift bewusst NICHT hoch (Datenmenge), sie bleibt im Geraet.
-  o.__sig = !!r.sigData && r.status!=='archiv' && r.status!=='abgerechnet'; // v7.9.1
+  o.__sig = !!r.sigData; // v7.9.3: Unterschrift zaehlt immer - wird auch bei archivierten hochgeladen
   return JSON.stringify(o);
 }
 function _recHashVon(r){ return _hashStr(_recInhalt(r)); }
@@ -1473,8 +1473,7 @@ function _auftragSchutz(w, o){
   let geaendert = false;
   if(!w.sigData && o.sigData){
     w.sigData = o.sigData; w.signiert = true;
-    // v7.9.1: nur bei aktiven Auftraegen neu hochladen (archivierte laden die Unterschrift nie hoch)
-    if(w.status!=='archiv' && w.status!=='abgerechnet') geaendert = true;
+    geaendert = true; // v7.9.3: auch archivierte - Unterschrift bleibt in der Cloud
   }
   if(!w.signerName && o.signerName){ w.signerName = o.signerName; }
   if(statusRang(o.status) > statusRang(w.status)){
@@ -1483,7 +1482,6 @@ function _auftragSchutz(w, o){
     w.arbeitStd = o.arbeitStd; w.fahrtStd = o.fahrtStd; w.gesamtStd = o.gesamtStd;
     w.abgeschlossenUm = o.abgeschlossenUm; w.abgeschlossenVon = o.abgeschlossenVon;
     if(o.doku) w.doku = o.doku;
-    if(o.pdfHtml) w.pdfHtml = o.pdfHtml;
     if(o.zeitManuell) w.zeitManuell = o.zeitManuell;
     if(o.materialien && o.materialien.length) w.materialien = o.materialien; // Material vom Abschluss
     if(o.timerRichtwertStd) w.timerRichtwertStd = o.timerRichtwertStd;
@@ -1547,11 +1545,14 @@ function updateSyncStatus(text) {
 // wo der 2-Sekunden-Timer sonst nie zum Zug kommt.
 async function saveJetzt(){
   if(saveTimeout){ clearTimeout(saveTimeout); saveTimeout=null; }
-  // v7.9: laeuft schon ein Upload, erst dessen Ende abwarten (max. 10 s),
-  // dann den eigenen Stand sicher hochladen - nie "nur vormerken".
+  // v7.9.3: laeuft schon ein Upload, dessen Ende abwarten (max. 60 s), dann den
+  // eigenen Stand hochladen. Liefert true nur, wenn er wirklich in der Cloud ist.
   let i=0;
-  while(window._uploadLaeuft && i<100){ await new Promise(r=>setTimeout(r,100)); i++; }
-  await saveToSupabase();
+  while(window._uploadLaeuft && i<600){ await new Promise(r=>setTimeout(r,100)); i++; }
+  if(window._uploadLaeuft){ window._uploadAusstehend = true; return false; }
+  const ok = await saveToSupabase();
+  if(!ok) window._uploadAusstehend = true;
+  return ok;
 }
 
 // Sicherheitsnetz: geht die App in den Hintergrund während noch ein
@@ -1564,7 +1565,7 @@ document.addEventListener('visibilitychange', function(){
   }
   // v7.9: App wieder im Vordergrund -> sofort abgleichen statt bis zu 30 s warten
   if(!document.hidden){
-    syncFromSupabase().then(function(){
+    syncPruefen().then(function(){ // v7.9.3: erst leicht pruefen
       try{ if(aktiverBenutzer && aktiverBenutzer.rolle!=='chef' && !maAktivAuftragId) maAuftraegeRendern(); }catch(e){}
     });
   }
@@ -1590,7 +1591,7 @@ function lokalSpeichern(){
   // Lokal speichern inkl. sigData + Logo
   try {
     const toSave = {kunden:state.kunden, mitarbeiter:state.mitarbeiter, termine:state.termine, auftragNr:state.auftragNr, settings:state.settings, zugaenge:state.zugaenge||[], rechnungen:state.rechnungen||[], rechnungNr:state.rechnungNr||1001, geloescht:state.geloescht||{}, _lastSaved:state._lastSaved||0};
-    toSave.auftraege = state.auftraege.map(a => ({...a, fotos:[], sigData:null})); // Bilddaten separat, nicht im Haupt-Blob
+    toSave.auftraege = state.auftraege.map(a => { const c={...a, fotos:[], sigData:null}; delete c.pdfHtml; return c; }); // Bilddaten separat; v7.9.3: kein Protokoll-HTML
     localStorage.setItem('fuchs_v2', JSON.stringify(toSave));
     // Logo separat sichern
     if(state.settings && state.settings.logoData) {
@@ -1609,20 +1610,17 @@ function lokalSpeichern(){
 
 async function saveToSupabase(versuch){
   versuch = versuch || 0;
+  let uploadOk = false; // v7.9.3: Ergebnis zurueckgeben (true = wirklich in der Cloud)
   // v7.9: nie zwei Uploads gleichzeitig - ein zweiter Aufruf wird nachgeholt
   if(versuch===0){
-    if(window._uploadLaeuft){ window._uploadNochmal = true; return; }
+    if(window._uploadLaeuft){ window._uploadNochmal = true; return false; }
     window._uploadLaeuft = true;
   }
   try {
     const toSave = {kunden:state.kunden, mitarbeiter:state.mitarbeiter, termine:state.termine, auftragNr:state.auftragNr, settings:state.settings, zugaenge:state.zugaenge||[], rechnungen:state.rechnungen||[], rechnungNr:state.rechnungNr||1001};
     // Unterschrift MUSS mit in die Cloud, sonst sieht der Chef sie nie.
     // Nur bei archivierten/abgerechneten Aufträgen weglassen (Payload klein halten).
-    toSave.auftraege = state.auftraege.map(a => ({
-      ...a,
-      fotos:[],
-      sigData: (a.status==='archiv'||a.status==='abgerechnet') ? null : (a.sigData||null)
-    }));
+    toSave.auftraege = state.auftraege.map(a => _fuerCloud(a)); // v7.9.3
 
     const checkRes = await fetch(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
       headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY}
@@ -1647,11 +1645,7 @@ async function saveToSupabase(versuch){
     }catch(e){ console.error('Merge:', e); }
     toSave.geloescht = state.geloescht || {};
     // Bilddaten nicht in den Blob, Unterschrift nur bei aktiven Auftraegen (wie bisher)
-    toSave.auftraege = (toSave.auftraege||[]).map(a => ({
-      ...a,
-      fotos:[],
-      sigData: (a.status==='archiv'||a.status==='abgerechnet') ? null : (a.sigData||null)
-    }));
+    toSave.auftraege = (toSave.auftraege||[]).map(a => _fuerCloud(a)); // v7.9.3
 
     toSave._lastSaved = Date.now();
 
@@ -1666,7 +1660,8 @@ async function saveToSupabase(versuch){
         try{
           res = await fetch(
             SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID +
-            '&data->>_lastSaved=eq.' + encodeURIComponent(String(remoteLastSaved)),
+            '&data->>_lastSaved=eq.' + encodeURIComponent(String(remoteLastSaved)) +
+            '&select=id', // v7.9.3: nur die ID zurueck statt des ganzen Datenbestands
             {
               method: 'PATCH',
               headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation'},
@@ -1706,12 +1701,17 @@ async function saveToSupabase(versuch){
     }
     if (res && res.ok) {
       state._lastSaved = toSave._lastSaved;
+      window._remoteTsBekannt = String(toSave._lastSaved); // v7.9.3
+      window._uploadAusstehend = false;
+      uploadOk = true;
       _nachUploadUebernehmen(toSave); // v7.9: Neues vom anderen Handy direkt uebernehmen
       updateSyncStatus('✓ ' + new Date().toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'}));
     } else {
+      window._uploadAusstehend = true; // v7.9.3: beim naechsten Pruefen nachholen
       updateSyncStatus('⚠️ Lokal gespeichert');
     }
   } catch(e) {
+    window._uploadAusstehend = true; // v7.9.3
     updateSyncStatus('⚠️ Offline');
   } finally {
     if(versuch===0){
@@ -1719,6 +1719,7 @@ async function saveToSupabase(versuch){
       if(window._uploadNochmal){ window._uploadNochmal = false; setTimeout(function(){ saveToSupabase(); }, 300); }
     }
   }
+  return uploadOk;
 }
 
 // v7.9: Nach erfolgreichem Upload den zusammengefuehrten Stand lokal uebernehmen
@@ -1749,6 +1750,64 @@ function _ansichtenAktualisieren(){
   try{
     if(typeof aktiverBenutzer!=='undefined' && aktiverBenutzer && aktiverBenutzer.rolle!=='chef' && !maAktivAuftragId) maAuftraegeRendern();
   }catch(e){}
+}
+
+// ══════════════════════════════════════════
+// v7.9.3: Datenmenge klein halten + Unterschriften retten
+// ══════════════════════════════════════════
+// Was von einem Auftrag in die Cloud geht: keine Fotos, kein Protokoll-HTML
+// (wurde nirgends gelesen, enthielt aber Logo + alle Fotos), Unterschrift immer.
+function _fuerCloud(a){
+  const c = {...a, fotos:[], sigData: a.sigData||null};
+  delete c.pdfHtml;
+  return c;
+}
+// Unterschrift aus altem Protokoll-HTML zurueckholen (fuer bereits verlorene)
+function _sigAusPdfHtml(a){
+  if(!a || a.sigData || !a.pdfHtml) return false;
+  const m = String(a.pdfHtml).match(/<img src="(data:image\/[a-zA-Z]+;base64,[^"]+)" style="max-width:300px;max-height:120px;/);
+  if(!m) return false;
+  a.sigData = m[1]; a.signiert = true;
+  try{ localStorage.setItem('fuchs_sig_'+a.id, a.sigData); }catch(e){}
+  return true;
+}
+// Rettet Unterschriften und entfernt danach das ungenutzte Protokoll-HTML
+function _pdfHtmlAufraeumen(liste){
+  let gerettet = 0, entfernt = 0;
+  (liste||[]).forEach(function(a){
+    if(!a) return;
+    if(_sigAusPdfHtml(a)) gerettet++;
+    if(a.pdfHtml !== undefined){ delete a.pdfHtml; entfernt++; }
+  });
+  return {gerettet: gerettet, entfernt: entfernt};
+}
+// Leichte Pruefung alle 30 s: nur den Zeitstempel der Cloud abfragen (wenige Bytes)
+// und den ganzen Datenbestand NUR laden, wenn sich etwas geaendert hat.
+window._remoteTsBekannt = null;
+window._uploadAusstehend = false;
+let _pruefenLaeuft = false;
+async function syncPruefen(){
+  if(document.hidden || _pruefenLaeuft) return;
+  _pruefenLaeuft = true;
+  try{
+    // Konnte ein Upload nicht gesendet werden -> jetzt nachholen
+    if(window._uploadAusstehend && !window._uploadLaeuft && !saveTimeout){ await saveToSupabase(); }
+    const res = await fetch(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID + '&select=ts:data->_lastSaved', {
+      headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY}
+    });
+    if(!res.ok){ updateSyncStatus('⚠️ Offline'); return; }
+    const rows = await res.json();
+    const ts = (rows && rows.length) ? String(rows[0].ts) : null;
+    if(ts === null || ts !== window._remoteTsBekannt){
+      await syncFromSupabase();
+    } else {
+      updateSyncStatus('✓ Synced ' + new Date().toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'}));
+    }
+  }catch(e){
+    updateSyncStatus('⚠️ Offline');
+  }finally{
+    _pruefenLaeuft = false;
+  }
 }
 
 async function load() {
@@ -1789,15 +1848,18 @@ async function load() {
     }
   } catch(e) {}
   _hashesNeuSetzen(); // v7.9: geladener Stand gilt als unveraendert
+  // v7.9.3: Unterschriften aus altem Protokoll-HTML retten, Protokoll-HTML entfernen.
+  // Nach _hashesNeuSetzen, damit gerettete Unterschriften als Aenderung hochgeladen werden.
+  let _ladeAufr = {gerettet:0, entfernt:0};
+  try{ _ladeAufr = _pdfHtmlAufraeumen(state.auftraege); if(_ladeAufr.entfernt) lokalSpeichern(); }catch(e){}
 
   // Dann aus Supabase laden (aktuellste Daten)
   updateSyncStatus('⟳ Lade...');
   await syncFromSupabase();
 
-  // Automatische Synchronisation alle 30 Sekunden
-  setInterval(async () => {
-    await syncFromSupabase();
-  }, 30000);
+  if(_ladeAufr.gerettet) save(); // gerettete Unterschriften in die Cloud
+  // v7.9.3: alle 30 Sekunden nur leicht pruefen (Mitarbeiter-Ansicht hat eigenen Takt)
+  setInterval(() => { if(!window._maAutoSync) syncPruefen(); }, 30000);
 }
 
 async function syncFromSupabase() {
@@ -1847,6 +1909,8 @@ async function syncFromSupabase() {
           if(erg.lokalNeuer) korrekturNoetig = true;
         });
 
+        // v7.9.3: Unterschriften aus altem Protokoll-HTML retten, Protokoll-HTML entfernen
+        try{ if(_pdfHtmlAufraeumen(state.auftraege).gerettet) korrekturNoetig = true; }catch(e){}
         // Fotos nach Sync wiederherstellen
         // sigData: lokalen State behalten wenn Supabase null hat
         state.auftraege.forEach(a=>{
@@ -1923,6 +1987,7 @@ async function syncFromSupabase() {
             }
           } catch(e) {}
         }
+        window._remoteTsBekannt = String(remoteTs); // v7.9.3: diesen Cloud-Stand kennen wir jetzt
         updateSyncStatus('✓ Synced ' + new Date().toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'}));
       }
     } else {
@@ -3697,7 +3762,7 @@ function maAppStarten(){
   // Automatisch alle 30 Sekunden aktualisieren
   if(window._maAutoSync) clearInterval(window._maAutoSync);
   window._maAutoSync = setInterval(()=>{
-    syncFromSupabase().then(()=>{
+    syncPruefen().then(()=>{ // v7.9.3: leichte Pruefung, einziger Takt auf dem MA-Handy
       // Nur neu rendern wenn kein Auftrag gerade aktiv bearbeitet wird
       if(!maAktivAuftragId) maAuftraegeRendern();
       const status = document.getElementById('ma-sync-status');
@@ -4092,8 +4157,7 @@ async function maAuftragAbschliessen(id){
   if(!a.fotos||!a.fotos.length){
     try{ const f=localStorage.getItem('fuchs_fotos_'+a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
   }
-  // PDF auf Mitarbeiter-Handy generieren mit Unterschrift
-  a.pdfHtml = maPdfHtmlGenerieren(a);
+  // v7.9.3: kein Protokoll-HTML mehr im Auftrag speichern (wurde nie gelesen, machte die Daten riesig)
   save();
   updateWarteschlange();
   // Push-Benachrichtigung an Chef
@@ -4101,12 +4165,16 @@ async function maAuftragAbschliessen(id){
   maAuftraegeRendern();
   // Cloud-Speicherung ABWARTEN bevor Dialoge kommen - sonst kann das
   // Teilen-Menü (App-Wechsel zu WhatsApp etc.) den Upload abwürgen.
+  const maStatus = document.getElementById('ma-sync-status');
+  if(maStatus) maStatus.textContent = '⟳ Wird gesendet...';
   updateSyncStatus('⟳ Speichere...');
-  await saveJetzt();
-  if(naechster){
-    alert(`✓ Auftrag abgeschlossen!\n\nNächster Auftrag aktiviert: ${naechster.nr} – ${naechster.art}`);
+  const gesendet = await saveJetzt(); // v7.9.3: Meldung erst, wenn wirklich gesendet
+  if(maStatus) maStatus.textContent = gesendet ? ('✓ Gesendet '+new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr') : '⚠️ Noch nicht gesendet';
+  const naechsterText = naechster ? `\n\nNächster Auftrag: ${naechster.nr} – ${naechster.art}` : '';
+  if(gesendet){
+    alert('✓ Auftrag abgeschlossen' + naechsterText);
   } else {
-    alert('✓ Auftrag abgeschlossen! Chef wird benachrichtigt.');
+    alert('⚠️ Auftrag abgeschlossen, aber noch nicht gesendet.\n\nBitte Internet prüfen – die App sendet automatisch, sobald wieder Verbindung da ist.' + naechsterText);
   }
   // Direkt anbieten, das Protokoll zu teilen (WhatsApp/Dropbox/Mail) -
   // zusätzlich zur Cloud, nicht als Ersatz dafür
