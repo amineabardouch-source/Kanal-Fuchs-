@@ -1391,7 +1391,7 @@ let state = {
 };
 
 // ---- SUPABASE SYNC ----
-const APP_VERSION = 'v7.9.3';
+const APP_VERSION = 'v7.9.4';
 // Rangfolge der Auftrags-Status: ein Auftrag darf beim Sync (in beide
 // Richtungen) nie von einem höheren auf einen niedrigeren Rang zurückfallen.
 // Das verhindert, dass ein Gerät mit veraltetem Stand (z.B. weil es die
@@ -1810,6 +1810,54 @@ async function syncPruefen(){
   }
 }
 
+// ══════════════════════════════════════════
+// v7.9.4: Bilder verkleinern (Unterschrift, Logo) - haelt den Datenbestand klein
+// ══════════════════════════════════════════
+function _bildVerkleinern(dataUrl, maxW, typ, qual){
+  return new Promise(function(res){
+    try{
+      const img=new Image();
+      img.onload=function(){
+        try{
+          const s=Math.min(1, maxW/img.width);
+          const c=document.createElement('canvas');
+          c.width=Math.max(1,Math.round(img.width*s)); c.height=Math.max(1,Math.round(img.height*s));
+          const x=c.getContext('2d');
+          if(typ==='image/jpeg'){ x.fillStyle='#ffffff'; x.fillRect(0,0,c.width,c.height); }
+          x.drawImage(img,0,0,c.width,c.height);
+          res(c.toDataURL(typ,qual));
+        }catch(e){ res(dataUrl); }
+      };
+      img.onerror=function(){ res(dataUrl); };
+      img.src=dataUrl;
+    }catch(e){ res(dataUrl); }
+  });
+}
+const SIG_GRENZE = 30000; // Zeichen; verkleinerte Unterschrift ~15.000
+function _sigKlein(dataUrl){ return _bildVerkleinern(dataUrl, 600, 'image/jpeg', 0.7); }
+// Grosse Unterschriften (alte Versionen) einmal verkleinern
+async function _unterschriftenVerkleinern(){
+  if(window._sigVerkleinernLaeuft) return;
+  window._sigVerkleinernLaeuft = true;
+  let n = 0;
+  try{
+    for(const a of (state.auftraege||[])){
+      if(a && typeof a.sigData==='string' && a.sigData.length > SIG_GRENZE){
+        const k = await _sigKlein(a.sigData);
+        if(k && k.length < a.sigData.length){
+          a.sigData = k;
+          a._u = Date.now(); // als neuer markieren, sonst gewinnt beim Zusammenfuehren die grosse Cloud-Version
+          try{ localStorage.setItem('fuchs_sig_'+a.id, k); }catch(e){}
+          n++;
+        }
+      }
+    }
+  }catch(e){}
+  window._sigVerkleinernLaeuft = false;
+  if(n) save();
+  return n;
+}
+
 async function load() {
   // Zuerst lokal laden (sofort sichtbar)
   try {
@@ -1858,6 +1906,7 @@ async function load() {
   await syncFromSupabase();
 
   if(_ladeAufr.gerettet) save(); // gerettete Unterschriften in die Cloud
+  _unterschriftenVerkleinern(); // v7.9.4
   // v7.9.3: alle 30 Sekunden nur leicht pruefen (Mitarbeiter-Ansicht hat eigenen Takt)
   setInterval(() => { if(!window._maAutoSync) syncPruefen(); }, 30000);
 }
@@ -1988,6 +2037,7 @@ async function syncFromSupabase() {
           } catch(e) {}
         }
         window._remoteTsBekannt = String(remoteTs); // v7.9.3: diesen Cloud-Stand kennen wir jetzt
+        setTimeout(_unterschriftenVerkleinern, 500); // v7.9.4: grosse Unterschriften von alten Geraeten verkleinern
         updateSyncStatus('✓ Synced ' + new Date().toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'}));
       }
     } else {
@@ -2195,6 +2245,7 @@ function sigModalSpeichern(){
     // Dann Unterschrift drüber zeichnen
     tempCtx.drawImage(canvas, 0, 0);
     sigDataURL=tempCanvas.toDataURL('image/jpeg', 0.9);
+    _sigKlein(sigDataURL).then(function(k){ sigDataURL=k; const p2=document.getElementById('sig-preview-img'); if(p2) p2.src=k; try{baustelleSichern();}catch(e){} }); // v7.9.4
     const pi=document.getElementById('sig-preview-img');
     if(pi){pi.src=sigDataURL;pi.style.display='block';}
     const pt=document.getElementById('sig-preview-text');
@@ -4357,6 +4408,7 @@ function maUnterschriftStarten(auftragId){
         if(hasContent){
           a.sigData = canvas.toDataURL('image/jpeg', 0.85);
           a.signiert = true;
+          _sigKlein(a.sigData).then(function(k){ if(a.sigData && k.length < a.sigData.length){ a.sigData=k; try{ localStorage.setItem('fuchs_sig_'+a.id, k); }catch(e){} save(); } }); // v7.9.4
           // sigData in localStorage sichern damit Sync es nicht überschreibt
           try{ localStorage.setItem('fuchs_sig_'+a.id, a.sigData); }catch(e){}
           save();
@@ -4990,9 +5042,12 @@ initTheme();
 function logoHochladen(input){
   if(!input.files||!input.files[0])return;
   const r=new FileReader();
-  r.onload=e=>{
-    const data=e.target.result;
+  r.onload=async e=>{
+    // v7.9.4: Logo verkleinern (max. 400 px), sonst laedt jedes Geraet ein Handyfoto bei jedem Abruf mit
+    let data=await _bildVerkleinern(e.target.result, 400, 'image/png');
+    if(data.length > 120000) data=await _bildVerkleinern(e.target.result, 400, 'image/jpeg', 0.85);
     state.settings.logoData=data;
+    state.settings._u=Date.now();
     updateLogoUI(data);
     save();
   };
@@ -6324,7 +6379,7 @@ function backupImportieren(input){
 function initOfflineDetection(){
   window.addEventListener('online', ()=>{
     updateSyncStatus('↑ Online – synchronisiere...');
-    syncFromSupabase().then(()=>saveToSupabase());
+    syncPruefen(); // v7.9.4: leicht pruefen statt alles herunter- und hochladen
   });
   window.addEventListener('offline', ()=>{
     updateSyncStatus('⚠️ Offline – lokal gespeichert');
