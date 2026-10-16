@@ -1623,14 +1623,14 @@ function lokalSpeichern(){
   try {
     const toSave = {kunden:state.kunden, mitarbeiter:state.mitarbeiter, termine:state.termine, auftragNr:state.auftragNr, settings:state.settings, zugaenge:state.zugaenge||[], rechnungen:state.rechnungen||[], rechnungNr:state.rechnungNr||1001, geloescht:state.geloescht||{}, _lastSaved:state._lastSaved||0};
     toSave.auftraege = state.auftraege.map(a => { const c={...a, fotos:[], sigData:null}; delete c.pdfHtml; return c; }); // Bilddaten separat; v7.9.3: kein Protokoll-HTML
-    localStorage.setItem('fuchs_v2', JSON.stringify(toSave));
+    try{ localStorage.setItem('fuchs_v2', JSON.stringify(toSave)); }catch(e){ _speicherVollMelden(); } // v7.9.4: nicht mehr still
     // Logo separat sichern
     if(state.settings && state.settings.logoData) {
       try { localStorage.setItem('fuchs_logo', state.settings.logoData); } catch(e) {}
     }
     // Fotos + Unterschriften separat speichern (zu groß für den Haupt-Blob)
     state.auftraege.forEach(a=>{
-      if(a.fotos&&a.fotos.length) try{localStorage.setItem('fuchs_fotos_'+a.id, JSON.stringify(a.fotos));}catch(e){}
+      if(a.fotos&&a.fotos.length) _fotoSchreiben(a.id, a.fotos); // v7.9.4: IndexedDB
       // Unterschrift IMMER sichern - auch bei abgeschlossenen Aufträgen
       if(a.sigData) try{localStorage.setItem('fuchs_sig_'+a.id, a.sigData);}catch(e){}
       // Manuell eingetragene Zeiten absichern gegen Sync-Überschreibung
@@ -1778,7 +1778,7 @@ function _anhaengeWiederherstellen(){
   (state.auftraege||[]).forEach(function(a){
     if(!a.sigData){ try{ const sig=localStorage.getItem('fuchs_sig_'+a.id); if(sig) a.sigData=sig; }catch(e){} }
     if(a.sigData) a.signiert = true;
-    try{ const fotos=localStorage.getItem('fuchs_fotos_'+a.id); if(fotos && (!a.fotos || !a.fotos.length)) a.fotos=JSON.parse(fotos); }catch(e){}
+    try{ const fotos=_fotoLesenJSON(a.id); if(fotos && (!a.fotos || !a.fotos.length)) a.fotos=JSON.parse(fotos); }catch(e){}
   });
 }
 function _ansichtenAktualisieren(){
@@ -1900,6 +1900,105 @@ async function _unterschriftenVerkleinern(){
   return n;
 }
 
+// ══════════════════════════════════════════
+// v7.9.4: FOTO-SPEICHER (IndexedDB statt localStorage)
+// localStorage fasst nur ~5 MB - nach ca. 80 Fotos war er voll und die App
+// konnte danach STILL gar nichts mehr lokal speichern. IndexedDB fasst ein
+// Vielfaches. Alle Fotos liegen zusaetzlich im Arbeitsspeicher (_fotoCache),
+// damit der restliche Code wie bisher synchron darauf zugreifen kann.
+// ══════════════════════════════════════════
+const _fotoCache = new Map();
+let _fotoDb = null;
+function _fotoDbOeffnen(){
+  return new Promise(function(res){
+    try{
+      if(!window.indexedDB) return res(null);
+      const rq = indexedDB.open('fuchs_fotos', 1);
+      rq.onupgradeneeded = function(){ try{ rq.result.createObjectStore('fotos'); }catch(e){} };
+      rq.onsuccess = function(){ res(rq.result); };
+      rq.onerror = function(){ res(null); };
+      rq.onblocked = function(){ res(null); };
+    }catch(e){ res(null); }
+  });
+}
+function _fotoDbLaden(){
+  const arbeit = (async function(){
+    _fotoDb = await _fotoDbOeffnen();
+    if(_fotoDb){
+      await new Promise(function(res){
+        try{
+          const tx = _fotoDb.transaction('fotos','readonly'), st = tx.objectStore('fotos');
+          const rq = st.openCursor();
+          rq.onsuccess = function(){ const c = rq.result; if(c){ _fotoCache.set(String(c.key), c.value); c.continue(); } else res(); };
+          rq.onerror = function(){ res(); };
+        }catch(e){ res(); }
+      });
+    }
+    // Alte Fotos aus localStorage uebernehmen und dort freigeben
+    try{
+      const keys = [];
+      for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k && k.indexOf('fuchs_fotos_')===0) keys.push(k); }
+      keys.forEach(function(k){
+        const id = k.slice('fuchs_fotos_'.length);
+        try{
+          const arr = JSON.parse(localStorage.getItem(k)||'[]');
+          if(arr && arr.length && !_fotoCache.has(id)) _fotoCache.set(id, arr);
+        }catch(e){}
+      });
+      // Erst wenn IndexedDB das Schreiben bestaetigt hat, localStorage freigeben
+      if(_fotoDb && keys.length){
+        const fertig = await new Promise(function(res){
+          try{
+            const tx = _fotoDb.transaction('fotos','readwrite'), st = tx.objectStore('fotos');
+            keys.forEach(function(k){ const id=k.slice('fuchs_fotos_'.length); const arr=_fotoCache.get(id); if(arr && arr.length) st.put(arr, id); });
+            tx.oncomplete = function(){ res(true); }; tx.onerror = function(){ res(false); }; tx.onabort = function(){ res(false); };
+          }catch(e){ res(false); }
+        });
+        if(fertig) keys.forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
+      }
+      // Fotos der laufenden Baustelle ebenfalls umziehen
+      const rb = localStorage.getItem('fuchs_aktive_baustelle');
+      if(rb && _fotoDb){
+        const sb = JSON.parse(rb);
+        if(sb && sb.fotos && sb.fotos.length){ _fotoCache.set('baustelle', sb.fotos); _fotoDbPut('baustelle', sb.fotos); sb.fotos = []; localStorage.setItem('fuchs_aktive_baustelle', JSON.stringify(sb)); }
+      }
+    }catch(e){}
+  })();
+  // Nie laenger als 3 s auf den Speicher warten
+  return Promise.race([arbeit.catch(function(){}), new Promise(function(r){ setTimeout(r, 3000); })]);
+}
+function _fotoDbPut(id, arr){
+  if(!_fotoDb) return false;
+  try{
+    const tx = _fotoDb.transaction('fotos','readwrite');
+    if(arr && arr.length) tx.objectStore('fotos').put(arr, String(id));
+    else tx.objectStore('fotos').delete(String(id));
+    return true;
+  }catch(e){ return false; }
+}
+// Gibt die Fotos als JSON-Text zurueck (wie frueher localStorage.getItem) oder null
+function _fotoLesenJSON(id){
+  const arr = _fotoCache.get(String(id));
+  if(arr && arr.length) return JSON.stringify(arr);
+  if(!_fotoDb){ try{ return localStorage.getItem('fuchs_fotos_'+id); }catch(e){ return null; } }
+  return null;
+}
+// Schreibt nur, wenn sich etwas geaendert hat
+function _fotoSchreiben(id, arr){
+  const key = String(id), alt = _fotoCache.get(key);
+  const neu = (arr && arr.length) ? arr : null;
+  if(!neu && !alt) return;
+  if(neu && alt && alt.length===neu.length && alt.every(function(x,i){ return x===neu[i]; })) return;
+  if(neu) _fotoCache.set(key, neu.slice()); else _fotoCache.delete(key);
+  if(!_fotoDbPut(key, neu) && neu){ try{ localStorage.setItem('fuchs_fotos_'+key, JSON.stringify(neu)); }catch(e){ _speicherVollMelden(); } }
+}
+let _speicherVollGemeldet = false;
+function _speicherVollMelden(){
+  try{ updateSyncStatus('⚠ Gerätespeicher voll'); }catch(e){}
+  if(_speicherVollGemeldet) return; _speicherVollGemeldet = true;
+  setTimeout(function(){ alert('⚠ Der Speicher dieses Geräts ist voll – neue Änderungen werden hier gerade nicht gesichert.\n\nBitte unter Einstellungen „⬇ Backup exportieren“ und Fuchs informieren.'); }, 50);
+}
+
 async function load() {
   // Zuerst lokal laden (sofort sichtbar)
   try {
@@ -1914,7 +2013,7 @@ async function load() {
     // Fotos + Signaturen aus separatem Storage wiederherstellen
     state.auftraege.forEach(a=>{
       try{
-        const fotos=localStorage.getItem('fuchs_fotos_'+a.id);
+        const fotos=_fotoLesenJSON(a.id);
         if(fotos&&(!a.fotos||!a.fotos.length)) a.fotos=JSON.parse(fotos);
       }catch(e){}
       try{
@@ -2029,7 +2128,7 @@ async function syncFromSupabase() {
           }catch(e){}
           // Fotos wiederherstellen
           try{
-            const fotos = localStorage.getItem('fuchs_fotos_'+a.id);
+            const fotos = _fotoLesenJSON(a.id);
             if(fotos && (!a.fotos || !a.fotos.length)) a.fotos = JSON.parse(fotos);
           }catch(e){}
         });
@@ -2378,9 +2477,9 @@ function kundeAnlegen(){
 }
 function renderKunden(filter=''){
   const el=document.getElementById('kunden-liste');
-  const f=state.kunden.filter(k=>(k.vorname+' '+k.nachname+' '+k.ort+' '+(k.firma||'')).toLowerCase().includes(filter.toLowerCase()));
+  const f=state.kunden.filter(k=>[k.vorname,k.nachname,k.ort,k.firma,k.strasse,k.plz,k.tel,k.email,k.objekt].map(x=>x||'').join(' ').toLowerCase().includes(filter.toLowerCase())); // v7.9.4: auch Tel/E-Mail/Strasse
   if(!f.length){el.innerHTML='<div class="empty">Keine Kunden gefunden</div>';return;}
-  el.innerHTML=f.map(k=>`<div class="list-item" style="cursor:pointer;" onclick="kundeOeffnen(${k.id})"><div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;"><div class="avatar">${fxEsc(fxInitialen(k))}</div><div style="min-width:0;"><div style="font-weight:600;">${k.firma?k.firma:''}${k.firma&&(k.vorname||k.nachname)?'<br><span style="font-size:11px;color:var(--text2);">'+k.vorname+' '+k.nachname+'</span>':(!k.firma?k.vorname+' '+k.nachname:'')}</div><div style="font-size:12px;color:var(--text2);">${k.strasse?k.strasse+', ':''}${k.plz} ${k.ort}</div>${k.objekt?`<div style="font-size:11px;color:var(--text3);">${k.objekt}</div>`:''}</div></div><div style="display:flex;align-items:center;gap:6px;flex-shrink:0;" onclick="event.stopPropagation();">${k.wartung?`<span class="badge blue">${k.wartung==='jaehrlich'?'Jährl.':'Halbj.'}</span>`:''}<button class="btn sm primary" onclick="kundeOeffnen(${k.id})">👤 Details</button><button class="btn sm danger" onclick="kundeLoeschen(${k.id})">✕</button></div></div>`).join('');
+  el.innerHTML=f.map(k=>`<div class="list-item" style="cursor:pointer;" onclick="kundeOeffnen(${k.id})"><div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;"><div class="avatar">${fxEsc(fxInitialen(k))}</div><div style="min-width:0;"><div style="font-weight:600;">${k.firma?fxEsc(k.firma):''}${k.firma&&fxKundeName(k)?'<br><span style="font-size:11px;color:var(--text2);">'+fxEsc(fxKundeName(k))+'</span>':(!k.firma?fxEsc(fxKundeName(k)):'')}</div><div style="font-size:12px;color:var(--text2);">${k.strasse?fxEsc(k.strasse)+', ':''}${fxEsc(k.plz||'')} ${fxEsc(k.ort||'')}</div>${k.objekt?`<div style="font-size:11px;color:var(--text3);">${fxEsc(k.objekt)}</div>`:''}</div></div><div style="display:flex;align-items:center;gap:6px;flex-shrink:0;" onclick="event.stopPropagation();">${k.wartung?`<span class="badge blue">${k.wartung==='jaehrlich'?'Jährl.':'Halbj.'}</span>`:''}<button class="btn sm primary" onclick="kundeOeffnen(${k.id})">👤 Details</button><button class="btn sm danger" onclick="kundeLoeschen(${k.id})">✕</button></div></div>`).join('');
 }
 
 function kundeOeffnen(id){
@@ -2520,13 +2619,18 @@ function baustelleSichern(){
       aktiveBaustelle: state.aktiveBaustelle,
       timerStart: state.timerStart,
       materialien: state.materialien||[],
-      fotos: state.fotos||[],
+      fotos: _fotoDb ? [] : (state.fotos||[]), // v7.9.4: Fotos liegen in IndexedDB
+      doku: (document.getElementById('b-doku')||{}).value||'',
+      intern: (document.getElementById('b-intern')||{}).value||'',
+      fahrtzeit: (document.getElementById('b-fahrtzeit')||{}).value||'',
+      signer: (document.getElementById('b-signer-name')||{}).value||'',
       arbeitszeitManuellWert: arbeitszeitManuellWert,
       sigDataURL: sigDataURL,
       pausiert: !!state._pausiert,
       pausedAt: state._pausedAt || null,
       timestamp: Date.now()
     };
+    if(_fotoDb) _fotoSchreiben('baustelle', state.fotos||[]);
     localStorage.setItem('fuchs_aktive_baustelle', JSON.stringify(sicherung));
   }catch(e){}
 }
@@ -2544,6 +2648,7 @@ function baustelleSicherungLoeschen(){
   state._pausiert = false;
   state._pausedAt = null;
   try{ localStorage.removeItem('fuchs_aktive_baustelle'); }catch(e){}
+  _fotoSchreiben('baustelle', []); // v7.9.4
 }
 
 function baustelleWiederherstellen(){
@@ -2557,7 +2662,16 @@ function baustelleWiederherstellen(){
     state.aktiveBaustelle = s.aktiveBaustelle;
     state.timerStart = s.timerStart;
     state.materialien = s.materialien||[];
-    state.fotos = s.fotos||[];
+    state.fotos = (s.fotos&&s.fotos.length) ? s.fotos : ((_fotoCache.get('baustelle')||[]).slice());
+    // v7.9.4: Texte, Fotos und Material wieder anzeigen
+    try{
+      const setz=(id,v)=>{ const el=document.getElementById(id); if(el && v!=null) el.value=v; };
+      setz('b-doku', s.doku); setz('b-intern', s.intern); setz('b-fahrtzeit', s.fahrtzeit); setz('b-signer-name', s.signer);
+      const g=document.getElementById('foto-grid');
+      if(g) g.innerHTML=state.fotos.map(f=>`<div class="photo-thumb"><img src="${f}" alt="Foto"></div>`).join('');
+      const ml=document.getElementById('material-liste');
+      if(ml) ml.innerHTML=state.materialien.map(m=>`<div class="list-item"><span>${fxEsc(m.name)}</span><span style="color:var(--text2);">${fxEsc(m.menge)}</span></div>`).join('');
+    }catch(e){}
     arbeitszeitManuellWert = s.arbeitszeitManuellWert;
     sigDataURL = s.sigDataURL;
     state._pausiert = !!s.pausiert;
@@ -2744,7 +2858,7 @@ function materialHinzufuegen(){
   state.materialien.push({name:n,menge:m});
   const l=document.getElementById('material-liste');
   const d=document.createElement('div');d.className='list-item';
-  d.innerHTML=`<span>${n}</span><span style="color:var(--text2);">${m}</span>`;
+  d.innerHTML=`<span>${fxEsc(n)}</span><span style="color:var(--text2);">${fxEsc(m)}</span>`;
   l.appendChild(d);
   document.getElementById('mat-name').value='';
   document.getElementById('mat-menge').value='';
@@ -2885,7 +2999,9 @@ function emailKopieren(){
 // KALENDER
 const MONATE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
 const TAGE=['Mo','Di','Mi','Do','Fr','Sa','So'];
-function setDefaultDate(){document.getElementById('t-datum').value=new Date().toISOString().split('T')[0];}
+// v7.9.4: lokales Datum (toISOString ist UTC -> zwischen 0 und 2 Uhr war es der Vortag)
+function _heuteISO(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function setDefaultDate(){document.getElementById('t-datum').value=_heuteISO();}
 function calPrev(){state.calMonth--;if(state.calMonth<0){state.calMonth=11;state.calYear--;}renderCal();}
 function calNext(){state.calMonth++;if(state.calMonth>11){state.calMonth=0;state.calYear++;}renderCal();}
 function renderCal(){
@@ -2925,7 +3041,7 @@ function terminAnlegen(){
   if(!titel||!datum){alert('Bitte Titel und Datum eingeben.');return;}
   const kId=document.getElementById('t-kunde').value;
   const kunde=kId?state.kunden.find(k=>k.id==kId):null;
-  state.termine.push({id:Date.now(),titel,datum,zeit,kunde:kunde?kunde.vorname+' '+kunde.nachname:'',kundeId:kId||null,notiz:document.getElementById('t-notiz').value.trim()});
+  state.termine.push({id:Date.now(),titel,datum,zeit,kunde:kunde?kundeAnzeigeName(kunde):'',kundeId:kId||null,notiz:document.getElementById('t-notiz').value.trim()});
   document.getElementById('t-titel').value='';document.getElementById('t-notiz').value='';
   renderCal();renderAlleTermine();updateDashboard();save();
   // Wartungsvertrag-Erinnerung prüfen
@@ -2946,13 +3062,13 @@ function terminBearbeiten(id){
       <button onclick="document.getElementById('termin-edit-modal').remove()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:16px;">✕</button>
     </div>
     <div style="padding:16px;display:flex;flex-direction:column;gap:10px;">
-      <div class="form-group"><label>Titel</label><input id="te-titel" value="${t.titel}"></div>
+      <div class="form-group"><label>Titel</label><input id="te-titel" value="${fxEsc(t.titel)}"></div>
       <div class="form-row">
         <div class="form-group"><label>Datum</label><input id="te-datum" type="date" value="${t.datum}"></div>
         <div class="form-group"><label>Uhrzeit</label><input id="te-zeit" type="time" value="${t.zeit}"></div>
       </div>
       <div class="form-group"><label>Kunde</label><select id="te-kunde"><option value="">Kein Kunde</option>${kundenOptionen}</select></div>
-      <div class="form-group"><label>Notiz</label><textarea id="te-notiz" style="min-height:60px;">${t.notiz||''}</textarea></div>
+      <div class="form-group"><label>Notiz</label><textarea id="te-notiz" style="min-height:60px;">${fxEsc(t.notiz||'')}</textarea></div>
       <div style="display:flex;gap:8px;margin-top:4px;">
         <button class="btn primary" style="flex:1;" onclick="terminSpeichern(${id})">✓ Speichern</button>
         ${t.kundeId?`<button class="btn success" onclick="terminZuBaustelle(${id})">▶ Baustelle starten</button>`:''}
@@ -2994,15 +3110,15 @@ function renderAlleTermine(){
   const el=document.getElementById('alle-termine');
   const sorted=[...state.termine].sort((a,b)=>a.datum.localeCompare(b.datum)||a.zeit.localeCompare(b.zeit));
   if(!sorted.length){el.innerHTML='<div class="empty">Noch keine Termine</div>';return;}
-  const today=new Date().toISOString().split('T')[0];
+  const today=_heuteISO();
   el.innerHTML=sorted.map(t=>{
     const past=t.datum<today;
     const hatAuftrag=t.auftragId&&state.auftraege.find(a=>a.id===t.auftragId);
     return `<div class="list-item" style="${past?'opacity:0.6':''}">
       <div style="flex:1;">
-        <div style="font-weight:600;">${t.titel}</div>
-        <div style="font-size:12px;color:var(--text2);">${new Date(t.datum).toLocaleDateString('de-DE')} um ${t.zeit}${t.kunde?' · '+t.kunde:''}</div>
-        ${t.notiz?`<div style="font-size:11px;color:var(--text3);">${t.notiz}</div>`:''}
+        <div style="font-weight:600;">${fxEsc(t.titel)}</div>
+        <div style="font-size:12px;color:var(--text2);">${new Date(t.datum).toLocaleDateString('de-DE')} um ${fxEsc(t.zeit)}${t.kunde?' · '+fxEsc(t.kunde):''}</div>
+        ${t.notiz?`<div style="font-size:11px;color:var(--text3);">${fxEsc(t.notiz)}</div>`:''}
         ${hatAuftrag?`<span style="font-size:10px;background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:10px;font-weight:700;">📋 ${hatAuftrag.nr}</span>`:''}
       </div>
       <div style="display:flex;gap:5px;flex-shrink:0;">
@@ -3021,8 +3137,8 @@ function renderDayTermineNeu(date){
   const el=document.getElementById('day-termine');
   if(!termine.length){el.innerHTML='<div style="font-size:13px;color:var(--text2);padding:8px 0;">Keine Termine</div>';return;}
   el.innerHTML=termine.map(t=>`<div class="termin-item">
-    <div class="termin-time">${t.zeit}</div>
-    <div class="termin-info"><div class="termin-title">${t.titel}</div>${t.kunde?`<div class="termin-sub">${t.kunde}</div>`:''}${t.notiz?`<div class="termin-sub">${t.notiz}</div>`:''}</div>
+    <div class="termin-time">${fxEsc(t.zeit)}</div>
+    <div class="termin-info"><div class="termin-title">${fxEsc(t.titel)}</div>${t.kunde?`<div class="termin-sub">${fxEsc(t.kunde)}</div>`:''}${t.notiz?`<div class="termin-sub">${fxEsc(t.notiz)}</div>`:''}</div>
     <div style="display:flex;gap:5px;">
       <button class="btn sm" onclick="terminBearbeiten(${t.id})">✏️</button>
       ${t.kundeId?`<button class="btn sm success" onclick="terminZuBaustelle(${t.id})">▶</button>`:''}
@@ -3057,6 +3173,10 @@ function auftragLoeschen(id){
   if(!confirm('Auftrag wirklich löschen? Dies kann nicht rückgängig gemacht werden.'))return;
   loeschMarkieren('auftraege',id); // v7.9
   state.auftraege=state.auftraege.filter(a=>a.id!=id); // != statt !== für Typ-toleranz
+  // v7.9.4: zugehoerige Kalendertermine mitloeschen
+  (state.termine||[]).filter(t=>t.auftragId!=null&&t.auftragId==id).forEach(t=>loeschMarkieren('termine',t.id));
+  state.termine=(state.termine||[]).filter(t=>!(t.auftragId!=null&&t.auftragId==id));
+  if(typeof renderCal==='function'){ try{renderCal();renderAlleTermine();}catch(e){} }
   if(aktiverAuftraegeTab==='archiv') renderArchiv();
   else if(aktiverAuftraegeTab==='geplant') renderGeplant();
   else if(aktiverAuftraegeTab==='abgeschlossen') renderAbgeschlosseneAuftraege();
@@ -3498,7 +3618,7 @@ function auftragAlsPdfSpeichern(id){
   if(!a) return;
   // Fotos aus localStorage laden
   if(!a.fotos||!a.fotos.length){
-    try{ const f=localStorage.getItem('fuchs_fotos_'+a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
+    try{ const f=_fotoLesenJSON(a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
   }
   // sigData aus localStorage laden
   if(!a.sigData){
@@ -3513,7 +3633,7 @@ function auftragAlsPdfGenerieren(id){
   // Fotos aus localStorage laden falls im State nicht vorhanden
   if(!a.fotos||!a.fotos.length){
     try{
-      const fotos = localStorage.getItem('fuchs_fotos_'+a.id);
+      const fotos = _fotoLesenJSON(a.id);
       if(fotos) a.fotos = JSON.parse(fotos);
     }catch(e){}
   }
@@ -4134,6 +4254,7 @@ window.addEventListener('pagehide', function(){ baustelleSichern(); });
 function maFotoLoeschen(auftragId, idx){
   const a=state.auftraege.find(x=>x.id===auftragId);if(!a||!a.fotos)return;
   a.fotos.splice(idx,1);
+  if(!a.fotos.length) _fotoSchreiben(a.id, []); // v7.9.4: letztes Foto wirklich entfernen
   save();
   maFotoGridAktualisieren(auftragId);
 }
@@ -4169,7 +4290,7 @@ function maPdfHtmlGenerieren(a){
   // Fotos + sigData aus localStorage laden falls im State nicht vorhanden
   if(!a.fotos||!a.fotos.length){
     try{
-      const fotos = localStorage.getItem('fuchs_fotos_'+a.id);
+      const fotos = _fotoLesenJSON(a.id);
       if(fotos) a.fotos = JSON.parse(fotos);
     }catch(e){}
   }
@@ -4270,7 +4391,7 @@ async function maAuftragAbschliessen(id){
   }
   // Fotos aus localStorage laden falls nicht im State
   if(!a.fotos||!a.fotos.length){
-    try{ const f=localStorage.getItem('fuchs_fotos_'+a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
+    try{ const f=_fotoLesenJSON(a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
   }
   // v7.9.3: kein Protokoll-HTML mehr im Auftrag speichern (wurde nie gelesen, machte die Daten riesig)
   save();
@@ -4660,6 +4781,8 @@ function wqAuftragLoeschen(id){
   if(!confirm('Auftrag aus Warteschlange löschen?')) return;
   loeschMarkieren('auftraege',id); // v7.9
   state.auftraege = state.auftraege.filter(a=>a.id!==id);
+  (state.termine||[]).filter(t=>t.auftragId!=null&&t.auftragId==id).forEach(t=>loeschMarkieren('termine',t.id)); // v7.9.4
+  state.termine=(state.termine||[]).filter(t=>!(t.auftragId!=null&&t.auftragId==id));
   renderWarteschlange();
   renderAuftraege();
   updateWarteschlange();
@@ -5190,7 +5313,7 @@ function auftragAnnehmenOeffnen(){
   modal.style.display = 'block';
 
   // Datum auf heute setzen
-  document.getElementById('aa-datum').value = new Date().toISOString().split('T')[0];
+  document.getElementById('aa-datum').value = _heuteISO();
   document.getElementById('aa-uhrzeit').value = new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
 
   // Bestehende Kunden laden
@@ -5582,7 +5705,7 @@ function annehmenInit(){
   annehmenAuswahlAufheben(true);
   // Datum heute
   const datumEl = document.getElementById('an-datum');
-  if(datumEl) datumEl.value = new Date().toISOString().split('T')[0];
+  if(datumEl) datumEl.value = _heuteISO();
 
   // Kunden laden
   annehmenKundenSelectUpdate();
@@ -6580,7 +6703,7 @@ function renderStatistiken(){
 }
 
 // INIT
-load().then(()=>{loginInit();initOfflineDetection();initPushBenachrichtigungen();updateWarteschlange();renderWarteschlange();geplantePruefen();setInterval(geplantePruefen, 60000);setTimeout(baustelleWiederherstellen, 500);});renderKunden();renderMitarbeiter();renderAuftraege();updateDashboard();ladeEinstellungen();renderZugaenge();updateRechnungenSelect();
+_fotoDbLaden().then(load).then(()=>{loginInit();initOfflineDetection();initPushBenachrichtigungen();updateWarteschlange();renderWarteschlange();geplantePruefen();setInterval(geplantePruefen, 60000);setTimeout(baustelleWiederherstellen, 500);});renderKunden();renderMitarbeiter();renderAuftraege();updateDashboard();ladeEinstellungen();renderZugaenge();updateRechnungenSelect();
 </script>
 </body>
 </html>
