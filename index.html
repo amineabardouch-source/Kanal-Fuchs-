@@ -5152,7 +5152,7 @@ function rechnungStatusAendern(id){
   popup.id='status-popup';
   popup.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:20000;display:flex;align-items:center;justify-content:center;padding:16px;';
   const opt=(k,l)=>`<button onclick="rechnungStatusSetzen(${id},'${k}')" style="width:100%;padding:12px;margin-bottom:8px;border:1.5px solid var(--border);border-radius:var(--radius);background:${r.status===k?'var(--accent)':'var(--surface2)'};color:${r.status===k?'var(--on-accent)':'var(--text)'};font-size:14px;font-weight:600;cursor:pointer;text-align:left;">${l}</button>`;
-  popup.innerHTML=`<div style="background:var(--surface);border-radius:16px;padding:20px;width:100%;max-width:320px;"><div style="font-weight:700;font-size:15px;margin-bottom:14px;">Rechnung ${fxEsc(r.nr)}</div>${opt('offen','Offen')}${opt('bezahlt','Bezahlt')}${opt('gemahnt','Gemahnt')}<button onclick="document.getElementById('status-popup').remove()" class="btn" style="width:100%;margin-top:4px;justify-content:center;">Abbrechen</button></div>`;
+  popup.innerHTML=`<div style="background:var(--surface);border-radius:16px;padding:20px;width:100%;max-width:320px;"><div style="font-weight:700;font-size:15px;margin-bottom:14px;color:var(--text);">Rechnung ${fxEsc(r.nr)}</div>${opt('offen','Offen')}${opt('bezahlt','Bezahlt')}${opt('gemahnt','Gemahnt')}<button onclick="document.getElementById('status-popup').remove()" class="btn" style="width:100%;margin-top:4px;justify-content:center;">Abbrechen</button></div>`;
   document.body.appendChild(popup);
   popup.addEventListener('click',e=>{if(e.target===popup)popup.remove();});
 }
@@ -6565,7 +6565,7 @@ function auftragStatusAendern(id){
   popup.id = 'status-popup';
   popup.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:20000;display:flex;align-items:center;justify-content:center;padding:16px;';
   popup.innerHTML = `<div style="background:var(--surface);border-radius:16px;padding:20px;width:100%;max-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
-    <div style="font-weight:700;font-size:15px;margin-bottom:14px;">Status: ${a.nr}</div>
+    <div style="font-weight:700;font-size:15px;margin-bottom:14px;color:var(--text);">Status: ${fxEsc(a.nr)}</div>
     ${stati.map(s=>`<button onclick="auftragStatusSetzen(${id},'${s.key}','${s.label}')" style="width:100%;padding:12px;margin-bottom:8px;border:1.5px solid var(--border);border-radius:var(--radius);background:${a.status===s.key?'var(--accent)':'var(--surface2)'};color:${a.status===s.key?'#fff':'var(--text)'};font-size:14px;font-weight:600;cursor:pointer;text-align:left;">${s.label}</button>`).join('')}
     <button onclick="document.getElementById('status-popup').remove()" class="btn" style="width:100%;margin-top:4px;justify-content:center;">Abbrechen</button>
   </div>`;
