@@ -899,6 +899,11 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
           <label class="btn sm" style="cursor:pointer;">⬆ Backup importieren<input type="file" accept=".json" onchange="backupImportieren(this)" style="display:none!important;"></label>
         </div>
       </div>
+      <!-- v7.9.4: GERAETE + VERSION -->
+      <div style="margin-top:20px;">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;">📱 Geräte &amp; App-Version</div>
+        <div id="geraete-liste" style="margin-bottom:12px;"></div>
+      </div>
       <!-- ZUGÄNGE -->
       <div style="margin-top:20px;">
         <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;">Mitarbeiter-Zugänge</div>
@@ -1634,7 +1639,7 @@ function save() {
 function lokalSpeichern(){
   // Lokal speichern inkl. sigData + Logo
   try {
-    const toSave = {kunden:state.kunden, mitarbeiter:state.mitarbeiter, termine:state.termine, auftragNr:state.auftragNr, settings:state.settings, zugaenge:state.zugaenge||[], rechnungen:state.rechnungen||[], rechnungNr:state.rechnungNr||1001, geloescht:state.geloescht||{}, _lastSaved:state._lastSaved||0};
+    const toSave = {kunden:state.kunden, mitarbeiter:state.mitarbeiter, termine:state.termine, auftragNr:state.auftragNr, settings:state.settings, zugaenge:state.zugaenge||[], rechnungen:state.rechnungen||[], rechnungNr:state.rechnungNr||1001, geloescht:state.geloescht||{}, geraete:state.geraete||{}, _lastSaved:state._lastSaved||0};
     toSave.auftraege = state.auftraege.map(a => { const c={...a, fotos:[], sigData:null}; delete c.pdfHtml; return c; }); // Bilddaten separat; v7.9.3: kein Protokoll-HTML
     try{ localStorage.setItem('fuchs_v2', JSON.stringify(toSave)); }catch(e){ _speicherVollMelden(); } // v7.9.4: nicht mehr still
     // Logo separat sichern
@@ -1696,6 +1701,8 @@ async function saveToSupabase(versuch){
       }
     }catch(e){ console.error('Merge:', e); }
     toSave.geloescht = state.geloescht || {};
+    // v7.9.4: Geraete-Liste zusammenfuehren (eigener Eintrag + alle anderen)
+    try{ state.geraete = _geraeteVereinen(state.geraete, existing && existing[0] && existing[0].data && existing[0].data.geraete); toSave.geraete = state.geraete; }catch(e){}
     // Bilddaten nicht in den Blob, Unterschrift nur bei aktiven Auftraegen (wie bisher)
     toSave.auftraege = (toSave.auftraege||[]).map(a => _fuerCloud(a)); // v7.9.3
 
@@ -1874,6 +1881,109 @@ async function syncPruefen(){
     _pruefenLaeuft = false;
   }
 }
+
+// ══════════════════════════════════════════
+// v7.9.4: GERAETE-KENNUNG + AUTOMATISCHE UPDATES
+// Jedes Geraet traegt sich mit Name, Version und Zeitpunkt in state.geraete ein
+// (wird mit hochgeladen) - so sieht der Chef, welche Version wo laeuft.
+// Ausserdem prueft die App regelmaessig, ob auf GitHub eine neuere Version liegt,
+// und laedt sich dann selbst neu, sobald niemand gerade etwas eingibt.
+// ══════════════════════════════════════════
+function _geraetId(){
+  try{
+    let id = localStorage.getItem('fuchs_geraet_id');
+    if(!id){ id = 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); localStorage.setItem('fuchs_geraet_id', id); }
+    return id;
+  }catch(e){ return 'unbekannt'; }
+}
+function _geraetTyp(){
+  const ua = navigator.userAgent || '';
+  if(/iPhone/.test(ua)) return 'iPhone';
+  if(/iPad/.test(ua)) return 'iPad';
+  if(/SamsungBrowser/.test(ua)) return 'Android (Samsung-Browser)';
+  if(/Android/.test(ua)) return 'Android (Chrome)';
+  if(/Mac/.test(ua)) return 'Mac';
+  if(/Windows/.test(ua)) return 'Windows';
+  return 'Gerät';
+}
+function _geraeteVereinen(a, b){
+  const out = {};
+  [a,b].forEach(function(g){ if(!g || typeof g!=='object') return; Object.keys(g).forEach(function(k){ const e=g[k]; if(e && (!out[k] || (e.zeit||0) > (out[k].zeit||0))) out[k]=e; }); });
+  // Eintraege aelter als 90 Tage weglassen
+  const grenze = Date.now() - 90*24*3600*1000;
+  Object.keys(out).forEach(function(k){ if((out[k].zeit||0) < grenze) delete out[k]; });
+  return out;
+}
+// Eigenen Eintrag setzen; liefert true, wenn er sich (bis auf die Zeit) geaendert hat oder aelter als 6 Std. ist
+function _geraetMelden(){
+  if(!state.geraete || typeof state.geraete!=='object') state.geraete = {};
+  const id = _geraetId(), alt = state.geraete[id];
+  const name = (typeof aktiverBenutzer!=='undefined' && aktiverBenutzer && aktiverBenutzer.name) ? aktiverBenutzer.name : (alt && alt.name) || '–';
+  const neu = {name:name, version:APP_VERSION, typ:_geraetTyp(), zeit:Date.now()};
+  const wichtig = !alt || alt.version!==neu.version || alt.name!==neu.name || (Date.now()-(alt.zeit||0)) > 6*3600*1000;
+  if(wichtig) state.geraete[id] = neu;
+  return wichtig;
+}
+function renderGeraete(){
+  const el = document.getElementById('geraete-liste'); if(!el) return;
+  const g = state.geraete || {}, eigene = _geraetId();
+  const liste = Object.keys(g).map(k=>Object.assign({id:k}, g[k])).sort((a,b)=>(b.zeit||0)-(a.zeit||0));
+  if(!liste.length){ el.innerHTML='<div class="empty" style="font-size:13px;">Noch keine Geräte gemeldet – jedes Gerät meldet sich ab v7.9.4 selbst.</div>'; return; }
+  el.innerHTML = liste.map(e=>{
+    const aktuell = e.version===APP_VERSION;
+    const d = new Date(e.zeit||0);
+    const wann = d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})+' '+d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
+    return `<div class="list-item"><div style="flex:1;min-width:0;"><div style="font-weight:600;">${fxEsc(e.name||'–')}${e.id===eigene?' <span style="font-size:11px;color:var(--text3);">(dieses Gerät)</span>':''}</div><div style="font-size:12px;color:var(--text2);">${fxEsc(e.typ||'')} · zuletzt ${fxEsc(wann)}</div></div><span class="badge ${aktuell?'green':'amber'}">${fxEsc(e.version||'?')}${aktuell?' ✓':' – alt'}</span></div>`;
+  }).join('');
+}
+let _updatePruefungLaeuft = false;
+window._neueVersion = null;
+async function updatePruefen(){
+  if(_updatePruefungLaeuft || document.hidden || !/^https?:/.test(location.protocol)) return;
+  _updatePruefungLaeuft = true;
+  try{
+    const r = await _fetchT(location.pathname + '?update=' + Date.now(), {cache:'no-store'}, 15000);
+    if(!r.ok) return;
+    const t = await r.text();
+    const m = t.match(/const APP_VERSION = '([^']+)'/);
+    if(m && m[1] && m[1] !== APP_VERSION){ window._neueVersion = m[1]; updateEinspielenWennRuhig(); }
+  }catch(e){}
+  finally{ _updatePruefungLaeuft = false; }
+}
+function updateEinspielenWennRuhig(){
+  if(!window._neueVersion) return;
+  // nicht mitten in der Arbeit neu laden
+  const ae = document.activeElement;
+  const tippt = ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
+  const offenesFenster = document.getElementById('ma-sig-modal') || (document.getElementById('sig-modal') && document.getElementById('sig-modal').style.display==='flex');
+  if(tippt || offenesFenster || saveTimeout || window._uploadLaeuft || window._uploadAusstehend){
+    _updateHinweisZeigen(); return;
+  }
+  // Schutz gegen Neuladen-Schleife: wurde in den letzten 15 Min. schon neu geladen und die
+  // Version ist trotzdem alt (Zwischenspeicher), nur Hinweis zeigen
+  try{
+    const v = JSON.parse(sessionStorage.getItem('fuchs_update_versuch')||'null');
+    if(v && v.von===APP_VERSION && Date.now()-v.zeit < 15*60*1000){ _updateHinweisZeigen(); return; }
+    sessionStorage.setItem('fuchs_update_versuch', JSON.stringify({von:APP_VERSION, zeit:Date.now()}));
+  }catch(e){}
+  _updateLaden();
+}
+function _updateLaden(){
+  try{ baustelleSichern(); }catch(e){}
+  // eigene Adresse mit Versionsnummer -> umgeht den Zwischenspeicher des Browsers
+  location.replace(location.pathname + '?v=' + encodeURIComponent(window._neueVersion || Date.now()));
+}
+function _updateHinweisZeigen(){
+  if(document.getElementById('update-hinweis')) return;
+  const d = document.createElement('div');
+  d.id = 'update-hinweis';
+  d.style.cssText = 'position:fixed;left:12px;right:12px;bottom:90px;z-index:300000;background:#111;color:#fff;border-radius:14px;padding:12px 14px;display:flex;align-items:center;gap:10px;box-shadow:0 6px 24px rgba(0,0,0,0.35);font-size:14px;';
+  d.innerHTML = '<div style="flex:1;">🔄 Neue Version <b>'+fxEsc(window._neueVersion)+'</b> verfügbar</div><button style="background:#fff;color:#000;border:none;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer;">Jetzt laden</button>';
+  d.querySelector('button').onclick = _updateLaden;
+  document.body.appendChild(d);
+}
+document.addEventListener('visibilitychange', function(){ if(!document.hidden){ if(window._neueVersion) updateEinspielenWennRuhig(); else updatePruefen(); } });
+setInterval(updatePruefen, 15*60*1000);
 
 // ══════════════════════════════════════════
 // v7.9.4: Bilder verkleinern (Unterschrift, Logo) - haelt den Datenbestand klein
@@ -2074,6 +2184,8 @@ async function load() {
   try{ if(aktiverBenutzer && aktiverBenutzer.rolle!=='chef') maAuftraegeRendern(); }catch(e){}
 
   if(_ladeAufr.gerettet) save(); // gerettete Unterschriften in die Cloud
+  try{ if(_geraetMelden()) save(); }catch(e){} // v7.9.4: Version an die Cloud melden
+  setTimeout(updatePruefen, 5000); // v7.9.4
   _unterschriftenVerkleinern(); // v7.9.4
   // v7.9.3: alle 30 Sekunden nur leicht pruefen (Mitarbeiter-Ansicht hat eigenen Takt)
   setInterval(() => { if(!window._maAutoSync) syncPruefen(); }, 30000);
@@ -2124,6 +2236,7 @@ async function syncFromSupabase() {
           state.settings = Object.assign({}, remote.settings);
         }
         state.geloescht = _geloeschtVereinen(lokalGeloescht, remote.geloescht);
+        state.geraete = _geraeteVereinen(state.geraete, remote.geraete); // v7.9.4
         let korrekturNoetig = _geloeschtMehrAls(state.geloescht, remote.geloescht) || nrLokal > (remote.auftragNr||0);
         state.auftragNr = Math.max(nrLokal, remote.auftragNr||0);
         state.rechnungNr = Math.max(rnrLokal, remote.rechnungNr||0);
@@ -2185,6 +2298,7 @@ async function syncFromSupabase() {
         updateRechnungenSelect();
         annehmenMitarbeiterUpdate(); // Nur MA-Liste aktualisieren, nicht Felder löschen
         renderZugaenge();
+        try{ renderGeraete(); }catch(e){}
         // v7.9: zusammengefuehrter Stand gilt als unveraendert (kein Neu-Stempeln)
         _hashesNeuSetzen();
         if (remoteTs >= localTs || (_syncSignatur() + '#' + JSON.stringify(state.geloescht||{})) !== signaturVorher) lokalSpeichern();
@@ -3775,6 +3889,7 @@ function ladeEinstellungen(){
   if(document.getElementById('s-adr-strasse'))document.getElementById('s-adr-strasse').value=s.adrStrasse||'';
   if(document.getElementById('s-adr-ort'))document.getElementById('s-adr-ort').value=s.adrOrt||'';
   renderZugaenge();
+  try{ renderGeraete(); }catch(e){}
   // Admin-Felder vorausfüllen
   const admin=state.zugaenge&&state.zugaenge.find(z=>z.rolle==='chef');
   if(admin){
@@ -3972,6 +4087,7 @@ function loginPin(taste){
         aktiverBenutzer = loginZielBenutzer;
         // Immer eingeloggt bleiben - nur manuell abmelden möglich
         localStorage.setItem('fuchs_login', JSON.stringify({id:aktiverBenutzer.id, pin:aktiverBenutzer.pin}));
+        try{ if(_geraetMelden()) save(); }catch(e){} // v7.9.4
         document.getElementById('login-screen').style.display='none';
         if(aktiverBenutzer.rolle!=='chef'){
           maAppStarten();
@@ -4032,6 +4148,7 @@ function maAppStarten(){
   const app = document.getElementById('ma-app');
   app.style.display='block';
   document.getElementById('ma-name-topbar').textContent = aktiverBenutzer.name;
+  try{ const st=document.getElementById('ma-sync-status'); if(st) st.textContent='Meine Aufträge · '+APP_VERSION; }catch(e){} // v7.9.4
   const btn = document.getElementById('ma-theme-btn');
   if(btn) btn.textContent = document.documentElement.getAttribute('data-theme')==='dark'?'☀️':'🌙';
   maAuftraegeRendern();
@@ -4041,7 +4158,7 @@ function maAppStarten(){
     syncPruefen().then(()=>{ // v7.9.3: leichte Pruefung, einziger Takt auf dem MA-Handy
       maListeAktualisierenWennRuhig(); // v7.9.4: auch waehrend eines laufenden Auftrags
       const status = document.getElementById('ma-sync-status');
-      if(status) status.textContent='Auto-Sync '+new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr';
+      if(status) status.textContent='Auto-Sync '+new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr · '+APP_VERSION; // v7.9.4
     });
   }, 30000);
 }
