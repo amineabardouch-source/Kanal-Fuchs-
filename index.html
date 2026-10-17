@@ -1405,7 +1405,7 @@ let state = {
 };
 
 // ---- SUPABASE SYNC ----
-const APP_VERSION = 'v7.9.4';
+const APP_VERSION = 'v7.9.5';
 // Rangfolge der Auftrags-Status: ein Auftrag darf beim Sync (in beide
 // Richtungen) nie von einem höheren auf einen niedrigeren Rang zurückfallen.
 // Das verhindert, dass ein Gerät mit veraltetem Stand (z.B. weil es die
@@ -1988,13 +1988,16 @@ setInterval(updatePruefen, 15*60*1000);
 // ══════════════════════════════════════════
 // v7.9.4: Bilder verkleinern (Unterschrift, Logo) - haelt den Datenbestand klein
 // ══════════════════════════════════════════
-function _bildVerkleinern(dataUrl, maxW, typ, qual){
+function _bildVerkleinern(dataUrl, maxW, typ, qual, maxH){
   return new Promise(function(res){
     try{
       const img=new Image();
       img.onload=function(){
         try{
-          const s=Math.min(1, maxW/img.width);
+          const s=Math.min(1, maxW/img.width, maxH?maxH/img.height:1);
+          // v7.9.5: schon klein genug -> unveraendert zurueck (sonst wurde bei jedem Abgleich
+          // erneut komprimiert, Qualitaet sank und jedes Mal wurde neu hochgeladen)
+          if(s>=1 && String(dataUrl).indexOf('data:'+typ)===0){ res(dataUrl); return; }
           const c=document.createElement('canvas');
           c.width=Math.max(1,Math.round(img.width*s)); c.height=Math.max(1,Math.round(img.height*s));
           const x=c.getContext('2d');
@@ -2009,27 +2012,33 @@ function _bildVerkleinern(dataUrl, maxW, typ, qual){
   });
 }
 const SIG_GRENZE = 30000; // Zeichen; verkleinerte Unterschrift ~15.000
-function _sigKlein(dataUrl){ return _bildVerkleinern(dataUrl, 600, 'image/jpeg', 0.7); }
+function _sigKlein(dataUrl){ return _bildVerkleinern(dataUrl, 600, 'image/jpeg', 0.7, 600); } // v7.9.5: auch Hochformat begrenzen
 // Grosse Unterschriften (alte Versionen) einmal verkleinern
 async function _unterschriftenVerkleinern(){
-  if(window._sigVerkleinernLaeuft) return;
+  // v7.9.5: laeuft schon eine Runde, danach noch einmal laufen (statt die Anfrage zu verwerfen)
+  if(window._sigVerkleinernLaeuft){ window._sigVerkleinernNochmal = true; return 0; }
   window._sigVerkleinernLaeuft = true;
   let n = 0;
   try{
-    for(const a of (state.auftraege||[])){
-      if(a && typeof a.sigData==='string' && a.sigData.length > SIG_GRENZE){
-        const k = await _sigKlein(a.sigData);
-        if(k && k.length < a.sigData.length){
-          a.sigData = k;
-          a._u = Date.now(); // als neuer markieren, sonst gewinnt beim Zusammenfuehren die grosse Cloud-Version
-          try{ localStorage.setItem('fuchs_sig_'+a.id, k); }catch(e){}
-          n++;
-        }
+    const ids = (state.auftraege||[]).filter(a=>a && typeof a.sigData==='string' && a.sigData.length > SIG_GRENZE).map(a=>a.id);
+    for(const id of ids){
+      const vorher = (state.auftraege.find(x=>x.id===id)||{}).sigData;
+      if(typeof vorher!=='string' || vorher.length <= SIG_GRENZE) continue;
+      const k = await _sigKlein(vorher);
+      // v7.9.5: NACH dem Warten den aktuellen Auftrag suchen - der Abgleich kann ihn inzwischen
+      // durch ein neues Objekt ersetzt haben (sonst landete die kleine Unterschrift in einer alten Kopie)
+      const a = state.auftraege.find(x=>x.id===id);
+      if(a && a.sigData===vorher && k && k.length < vorher.length){
+        a.sigData = k;
+        a._u = Date.now(); // als neuer markieren, sonst gewinnt beim Zusammenfuehren die grosse Cloud-Version
+        try{ localStorage.setItem('fuchs_sig_'+a.id, k); }catch(e){}
+        n++;
       }
     }
   }catch(e){}
   window._sigVerkleinernLaeuft = false;
   if(n) save();
+  if(window._sigVerkleinernNochmal){ window._sigVerkleinernNochmal = false; setTimeout(_unterschriftenVerkleinern, 1500); }
   return n;
 }
 
@@ -4779,7 +4788,8 @@ function maUnterschriftStarten(auftragId){
         if(hasContent){
           a.sigData = canvas.toDataURL('image/jpeg', 0.85);
           a.signiert = true;
-          _sigKlein(a.sigData).then(function(k){ if(a.sigData && k.length < a.sigData.length){ a.sigData=k; try{ localStorage.setItem('fuchs_sig_'+a.id, k); }catch(e){} save(); } }); // v7.9.4
+          const _sigGross = a.sigData, _sigId = a.id;
+          _sigKlein(_sigGross).then(function(k){ const ak=state.auftraege.find(x=>x.id===_sigId); if(ak && ak.sigData===_sigGross && k.length < _sigGross.length){ ak.sigData=k; ak._u=Date.now(); try{ localStorage.setItem('fuchs_sig_'+ak.id, k); }catch(e){} save(); } }); // v7.9.5: aktuellen Auftrag nehmen
           // sigData in localStorage sichern damit Sync es nicht überschreibt
           try{ localStorage.setItem('fuchs_sig_'+a.id, a.sigData); }catch(e){}
           save();
