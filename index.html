@@ -641,7 +641,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
       <div style="display:flex;flex-direction:column;gap:8px;margin-top:16px;">
         <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;">Auftrag speichern als:</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn success" onclick="baustelleBeendenMitOption('direkt')" style="flex:1;justify-content:center;">✓ Abschließen & zuweisen</button>
+          <button class="btn success" onclick="baustelleBeendenMitOption('direkt')" style="flex:1;justify-content:center;">✓ Abschließen</button>
           <button class="btn" onclick="baustelleBeendenMitOption('warteschlange')" style="flex:1;justify-content:center;background:var(--amber);color:#fff;border-color:var(--amber);">🕐 In Warteschlange</button>
         </div>
         <button class="btn" onclick="baustellePause()" id="pause-btn" style="justify-content:center;">⏸ Pause</button>
@@ -860,6 +860,14 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
         <input id="s-tel" style="width:180px;text-align:right;" placeholder="06003/8276464">
       </div>
       <div class="settings-row">
+        <div><div class="settings-label">Firmenanschrift</div><div class="settings-sub">Straße + Nr. (Pflicht auf Rechnungen)</div></div>
+        <input id="s-adr-strasse" style="width:180px;text-align:right;" placeholder="Musterstraße 1">
+      </div>
+      <div class="settings-row">
+        <div><div class="settings-label">PLZ + Ort</div><div class="settings-sub">Firmensitz</div></div>
+        <input id="s-adr-ort" style="width:180px;text-align:right;" placeholder="61191 Rosbach">
+      </div>
+      <div class="settings-row">
         <div><div class="settings-label">IBAN</div><div class="settings-sub">Für Rechnungen</div></div>
         <input id="s-iban" style="width:180px;text-align:right;" placeholder="DE12 3456...">
       </div>
@@ -890,6 +898,11 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
           <button class="btn sm success" onclick="backupExportieren()">⬇ Backup exportieren</button>
           <label class="btn sm" style="cursor:pointer;">⬆ Backup importieren<input type="file" accept=".json" onchange="backupImportieren(this)" style="display:none!important;"></label>
         </div>
+      </div>
+      <!-- v7.9.4: GERAETE + VERSION -->
+      <div style="margin-top:20px;">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;">📱 Geräte &amp; App-Version</div>
+        <div id="geraete-liste" style="margin-bottom:12px;"></div>
       </div>
       <!-- ZUGÄNGE -->
       <div style="margin-top:20px;">
@@ -1168,6 +1181,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 
       <!-- Neue Kunde Felder -->
       <div id="an-kunde-felder" style="display:none;">
         <div id="an-kunde-gesperrt-hinweis" style="display:none;font-size:12px;color:var(--text2);margin-bottom:8px;">🔒 Bestandskunde: Diese Daten sind die Rechnungsadresse und werden hier nicht geändert. Änderungen im Kundendetail.</div>
+        <div class="form-group"><label>Firma <span style="font-weight:400;color:var(--text2);">(optional, z.B. Hausverwaltung)</span></label><input id="an-firma" placeholder="z.B. Hausverwaltung Muster GmbH"></div>
         <div class="form-row">
           <div class="form-group"><label>Vorname *</label><input id="an-vorname" placeholder="Max"></div>
           <div class="form-group"><label>Nachname *</label><input id="an-nachname" placeholder="Mustermann"></div>
@@ -1391,7 +1405,7 @@ let state = {
 };
 
 // ---- SUPABASE SYNC ----
-const APP_VERSION = 'v7.9.2';
+const APP_VERSION = 'v7.9.4';
 // Rangfolge der Auftrags-Status: ein Auftrag darf beim Sync (in beide
 // Richtungen) nie von einem höheren auf einen niedrigeren Rang zurückfallen.
 // Das verhindert, dass ein Gerät mit veraltetem Stand (z.B. weil es die
@@ -1399,10 +1413,37 @@ const APP_VERSION = 'v7.9.2';
 // auf "offen" zurückdreht, egal welches Gerät zuletzt geschrieben hat.
 const STATUS_RANG = {warteschlange:0, geplant:0, offen:1, in_bearbeitung:2, abgeschlossen:3, abgerechnet:4, archiv:5};
 function statusRang(s){ return STATUS_RANG.hasOwnProperty(s) ? STATUS_RANG[s] : 1; }
+// v7.9.4: Bewusste Status-Aenderungen (Zuweisen, Wegnehmen, Zuruecksetzen, Abschliessen ...)
+// bekommen einen Zeitstempel (statusZeit). Beim Sync gewinnt die spaetere bewusste Aenderung -
+// auch wenn sie den Status zuruecksetzt. Nur wenn keine Seite einen Zeitstempel hat, gilt die
+// alte Rangfolge (so kann ein veraltetes Geraet "erledigt" nicht wieder auf "offen" drehen).
+const STATUS_LABEL = {warteschlange:'Warteschlange', geplant:'Geplant', offen:'Offen', in_bearbeitung:'In Bearbeitung', abgeschlossen:'Abgeschlossen', abgerechnet:'Abgerechnet', archiv:'Archiv'};
+function statusSetzen(a, status, label){
+  if(!a) return;
+  a.status = status;
+  a.statusLabel = label || STATUS_LABEL[status] || status;
+  a.statusZeit = Math.max(Date.now(), (a.statusZeit||0)+1);
+  a.inWarteschlange = (status === 'warteschlange');
+  if(status === 'warteschlange' || statusRang(status) >= 3){ a.zugewiesenAn = null; a.reihenfolge = null; }
+}
+function _statusVorrang(o, w){
+  const oz = o.statusZeit||0, wz = w.statusZeit||0;
+  if(oz || wz){ if(oz !== wz) return oz > wz; return false; }
+  return statusRang(o.status) > statusRang(w.status);
+}
 const SUPABASE_URL = 'https://ihnxufazorafeykgwdao.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_kgL9xcy0MViRynyx95J6sw_rItGmgSj';
 const RECORD_ID = 'fuchs-main';
 let saveTimeout = null;
+// v7.9.4: jede Cloud-Anfrage bekommt ein Zeitlimit. Ohne Limit konnte eine im Funkloch
+// haengende Anfrage alle weiteren Uploads bis zum Neustart blockieren.
+function _fetchT(url, opts, ms){
+  opts = opts || {};
+  if(typeof AbortController === 'undefined') return fetch(url, opts);
+  const ac = new AbortController();
+  const t = setTimeout(function(){ try{ ac.abort(); }catch(e){} }, ms || 60000);
+  return fetch(url, Object.assign({}, opts, {signal: ac.signal})).finally(function(){ clearTimeout(t); });
+}
 
 // ══════════════════════════════════════════
 // v7.9: DATENSATZ-GENAUER SYNC
@@ -1423,7 +1464,7 @@ function _recInhalt(r){
   });
   // Unterschrift vorhanden ja/nein zaehlt als Aenderung - ausser bei archiviert/abgerechnet:
   // dort laedt die App die Unterschrift bewusst NICHT hoch (Datenmenge), sie bleibt im Geraet.
-  o.__sig = !!r.sigData && r.status!=='archiv' && r.status!=='abgerechnet'; // v7.9.1
+  o.__sig = !!r.sigData; // v7.9.3: Unterschrift zaehlt immer - wird auch bei archivierten hochgeladen
   return JSON.stringify(o);
 }
 function _recHashVon(r){ return _hashStr(_recInhalt(r)); }
@@ -1473,20 +1514,23 @@ function _auftragSchutz(w, o){
   let geaendert = false;
   if(!w.sigData && o.sigData){
     w.sigData = o.sigData; w.signiert = true;
-    // v7.9.1: nur bei aktiven Auftraegen neu hochladen (archivierte laden die Unterschrift nie hoch)
-    if(w.status!=='archiv' && w.status!=='abgerechnet') geaendert = true;
+    geaendert = true; // v7.9.3: auch archivierte - Unterschrift bleibt in der Cloud
   }
   if(!w.signerName && o.signerName){ w.signerName = o.signerName; }
-  if(statusRang(o.status) > statusRang(w.status)){
+  if(_statusVorrang(o, w)){
+    const hoeher = statusRang(o.status) > statusRang(w.status);
     w.status = o.status;
     w.statusLabel = o.statusLabel || w.statusLabel;
+    // v7.9.4: was zur Status-Aenderung gehoert, wandert mit (Zuweisung, Warteschlange)
+    ['statusZeit','inWarteschlange','zugewiesenAn','reihenfolge','maGestartet','archiviertAm'].forEach(function(f){ if(o.hasOwnProperty(f)) w[f] = o[f]; });
+    if(hoeher){
     w.arbeitStd = o.arbeitStd; w.fahrtStd = o.fahrtStd; w.gesamtStd = o.gesamtStd;
     w.abgeschlossenUm = o.abgeschlossenUm; w.abgeschlossenVon = o.abgeschlossenVon;
     if(o.doku) w.doku = o.doku;
-    if(o.pdfHtml) w.pdfHtml = o.pdfHtml;
     if(o.zeitManuell) w.zeitManuell = o.zeitManuell;
     if(o.materialien && o.materialien.length) w.materialien = o.materialien; // Material vom Abschluss
     if(o.timerRichtwertStd) w.timerRichtwertStd = o.timerRichtwertStd;
+    }
     geaendert = true;
   }
   return geaendert;
@@ -1494,7 +1538,10 @@ function _auftragSchutz(w, o){
 // Zwei Listen zusammenfuehren: pro ID gewinnt der neuere Stand (_u),
 // bei Gleichstand die Cloud. Geloeschte IDs fallen raus, doppelte IDs auch.
 function _listeZusammenfuehren(liste, lokal, remote, geloescht){
-  const tot = (geloescht && geloescht[liste]) || {};
+  // v7.9.4: Backup-Wiederherstellung hebt aeltere Loesch-Markierungen auf (geloescht['wieder_'+liste])
+  const totRoh = (geloescht && geloescht[liste]) || {}, wieder = (geloescht && geloescht['wieder_'+liste]) || {};
+  const tot = {};
+  Object.keys(totRoh).forEach(function(id){ if(!(wieder[id] && wieder[id] >= totRoh[id])) tot[id] = totRoh[id]; });
   const lokalMap = new Map();
   (lokal||[]).forEach(function(x){ if(x && x.id!==undefined && x.id!==null) lokalMap.set(String(x.id), x); });
   const remoteHatEchte = (remote||[]).length > 0;
@@ -1547,11 +1594,14 @@ function updateSyncStatus(text) {
 // wo der 2-Sekunden-Timer sonst nie zum Zug kommt.
 async function saveJetzt(){
   if(saveTimeout){ clearTimeout(saveTimeout); saveTimeout=null; }
-  // v7.9: laeuft schon ein Upload, erst dessen Ende abwarten (max. 10 s),
-  // dann den eigenen Stand sicher hochladen - nie "nur vormerken".
+  // v7.9.3: laeuft schon ein Upload, dessen Ende abwarten (max. 60 s), dann den
+  // eigenen Stand hochladen. Liefert true nur, wenn er wirklich in der Cloud ist.
   let i=0;
-  while(window._uploadLaeuft && i<100){ await new Promise(r=>setTimeout(r,100)); i++; }
-  await saveToSupabase();
+  while(window._uploadLaeuft && i<600){ await new Promise(r=>setTimeout(r,100)); i++; }
+  if(window._uploadLaeuft){ window._uploadAusstehend = true; return false; }
+  const ok = await saveToSupabase();
+  if(!ok) window._uploadAusstehend = true;
+  return ok;
 }
 
 // Sicherheitsnetz: geht die App in den Hintergrund während noch ein
@@ -1564,8 +1614,8 @@ document.addEventListener('visibilitychange', function(){
   }
   // v7.9: App wieder im Vordergrund -> sofort abgleichen statt bis zu 30 s warten
   if(!document.hidden){
-    syncFromSupabase().then(function(){
-      try{ if(aktiverBenutzer && aktiverBenutzer.rolle!=='chef' && !maAktivAuftragId) maAuftraegeRendern(); }catch(e){}
+    syncPruefen().then(function(){ // v7.9.3: erst leicht pruefen
+      maListeAktualisierenWennRuhig(); // v7.9.4
     });
   }
 });
@@ -1589,16 +1639,16 @@ function save() {
 function lokalSpeichern(){
   // Lokal speichern inkl. sigData + Logo
   try {
-    const toSave = {kunden:state.kunden, mitarbeiter:state.mitarbeiter, termine:state.termine, auftragNr:state.auftragNr, settings:state.settings, zugaenge:state.zugaenge||[], rechnungen:state.rechnungen||[], rechnungNr:state.rechnungNr||1001, geloescht:state.geloescht||{}, _lastSaved:state._lastSaved||0};
-    toSave.auftraege = state.auftraege.map(a => ({...a, fotos:[], sigData:null})); // Bilddaten separat, nicht im Haupt-Blob
-    localStorage.setItem('fuchs_v2', JSON.stringify(toSave));
+    const toSave = {kunden:state.kunden, mitarbeiter:state.mitarbeiter, termine:state.termine, auftragNr:state.auftragNr, settings:state.settings, zugaenge:state.zugaenge||[], rechnungen:state.rechnungen||[], rechnungNr:state.rechnungNr||1001, geloescht:state.geloescht||{}, geraete:state.geraete||{}, _lastSaved:state._lastSaved||0};
+    toSave.auftraege = state.auftraege.map(a => { const c={...a, fotos:[], sigData:null}; delete c.pdfHtml; return c; }); // Bilddaten separat; v7.9.3: kein Protokoll-HTML
+    try{ localStorage.setItem('fuchs_v2', JSON.stringify(toSave)); }catch(e){ _speicherVollMelden(); } // v7.9.4: nicht mehr still
     // Logo separat sichern
     if(state.settings && state.settings.logoData) {
       try { localStorage.setItem('fuchs_logo', state.settings.logoData); } catch(e) {}
     }
     // Fotos + Unterschriften separat speichern (zu groß für den Haupt-Blob)
     state.auftraege.forEach(a=>{
-      if(a.fotos&&a.fotos.length) try{localStorage.setItem('fuchs_fotos_'+a.id, JSON.stringify(a.fotos));}catch(e){}
+      if(a.fotos&&a.fotos.length) _fotoSchreiben(a.id, a.fotos); // v7.9.4: IndexedDB
       // Unterschrift IMMER sichern - auch bei abgeschlossenen Aufträgen
       if(a.sigData) try{localStorage.setItem('fuchs_sig_'+a.id, a.sigData);}catch(e){}
       // Manuell eingetragene Zeiten absichern gegen Sync-Überschreibung
@@ -1609,25 +1659,25 @@ function lokalSpeichern(){
 
 async function saveToSupabase(versuch){
   versuch = versuch || 0;
+  let uploadOk = false; // v7.9.3: Ergebnis zurueckgeben (true = wirklich in der Cloud)
   // v7.9: nie zwei Uploads gleichzeitig - ein zweiter Aufruf wird nachgeholt
   if(versuch===0){
-    if(window._uploadLaeuft){ window._uploadNochmal = true; return; }
+    if(window._uploadLaeuft){ window._uploadNochmal = true; return false; }
     window._uploadLaeuft = true;
   }
   try {
     const toSave = {kunden:state.kunden, mitarbeiter:state.mitarbeiter, termine:state.termine, auftragNr:state.auftragNr, settings:state.settings, zugaenge:state.zugaenge||[], rechnungen:state.rechnungen||[], rechnungNr:state.rechnungNr||1001};
     // Unterschrift MUSS mit in die Cloud, sonst sieht der Chef sie nie.
     // Nur bei archivierten/abgerechneten Aufträgen weglassen (Payload klein halten).
-    toSave.auftraege = state.auftraege.map(a => ({
-      ...a,
-      fotos:[],
-      sigData: (a.status==='archiv'||a.status==='abgerechnet') ? null : (a.sigData||null)
-    }));
+    toSave.auftraege = state.auftraege.map(a => _fuerCloud(a)); // v7.9.3
 
-    const checkRes = await fetch(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
+    const checkRes = await _fetchT(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
       headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY}
-    });
+    }, 90000);
+    // v7.9.4: ohne gueltigen Cloud-Stand nichts schreiben (sonst wuerde blind ueberschrieben)
+    if(!checkRes.ok){ window._uploadAusstehend = true; updateSyncStatus(_cloudFehlerText(checkRes.status)); return false; }
     const existing = await checkRes.json();
+    if(!Array.isArray(existing)){ window._uploadAusstehend = true; updateSyncStatus('⚠️ Lokal gespeichert'); return false; }
     const remoteLastSaved = (existing && existing.length>0 && existing[0].data) ? existing[0].data._lastSaved : null;
 
     // v7.9: Cloud-Stand datensatzgenau einarbeiten. Nichts, was nur in der
@@ -1643,15 +1693,18 @@ async function saveToSupabase(versuch){
         });
         toSave.auftragNr = Math.max(state.auftragNr||0, remoteData.auftragNr||0);
         toSave.rechnungNr = Math.max(state.rechnungNr||0, remoteData.rechnungNr||0);
+        // v7.9.4: neuere Einstellungen aus der Cloud nicht mit der eigenen alten Kopie ueberschreiben
+        if(remoteData.settings && _einstellungenNeuer(remoteData.settings, state.settings, false)){
+          state.settings = Object.assign({}, remoteData.settings);
+          toSave.settings = state.settings;
+        }
       }
     }catch(e){ console.error('Merge:', e); }
     toSave.geloescht = state.geloescht || {};
+    // v7.9.4: Geraete-Liste zusammenfuehren (eigener Eintrag + alle anderen)
+    try{ state.geraete = _geraeteVereinen(state.geraete, existing && existing[0] && existing[0].data && existing[0].data.geraete); toSave.geraete = state.geraete; }catch(e){}
     // Bilddaten nicht in den Blob, Unterschrift nur bei aktiven Auftraegen (wie bisher)
-    toSave.auftraege = (toSave.auftraege||[]).map(a => ({
-      ...a,
-      fotos:[],
-      sigData: (a.status==='archiv'||a.status==='abgerechnet') ? null : (a.sigData||null)
-    }));
+    toSave.auftraege = (toSave.auftraege||[]).map(a => _fuerCloud(a)); // v7.9.3
 
     toSave._lastSaved = Date.now();
 
@@ -1664,22 +1717,24 @@ async function saveToSupabase(versuch){
         // anderes Gerät gespeichert, schlägt dieser Versuch fehl statt
         // dessen Änderung stillschweigend zu überschreiben.
         try{
-          res = await fetch(
+          res = await _fetchT(
             SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID +
-            '&data->>_lastSaved=eq.' + encodeURIComponent(String(remoteLastSaved)),
+            '&data->>_lastSaved=eq.' + encodeURIComponent(String(remoteLastSaved)) +
+            '&select=id', // v7.9.3: nur die ID zurueck statt des ganzen Datenbestands
             {
               method: 'PATCH',
               headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation'},
               body: JSON.stringify({data: toSave})
-            }
+            }, 60000
           );
           if(res.ok){
             const updated = await res.json().catch(()=>null);
-            if(Array.isArray(updated) && updated.length===0) konflikt = true;
-          } else {
-            res = null; // Fällt unten auf den normalen Weg zurück
+            if(!Array.isArray(updated) || updated.length===0) konflikt = true;
+          } else if(res.status===400){
+            res = null; // Filter vom Server nicht verstanden -> wie bisher normal schreiben
           }
-        }catch(e){ res = null; }
+          // v7.9.4: Fehler der bedingten Anfrage -> NICHT blind ueberschreiben, spaeter erneut versuchen
+        }catch(e){ res = { ok:false }; }
       }
 
       if (konflikt && versuch < 4) {
@@ -1687,31 +1742,37 @@ async function saveToSupabase(versuch){
         await new Promise(r=>setTimeout(r, 250 + Math.random()*400));
         return await saveToSupabase(versuch+1);
       }
+      if (konflikt) res = { ok:false }; // v7.9.4: nach 5 Versuchen nicht als "gespeichert" melden
 
       if (!res) {
         // Kein Vergleichswert vorhanden oder bedingte Anfrage nicht möglich -
         // normales Schreiben, lieber speichern als gar nicht
-        res = await fetch(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
+        res = await _fetchT(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
           method: 'PATCH',
           headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal'},
           body: JSON.stringify({data: toSave})
-        });
+        }, 60000);
       }
     } else {
-      res = await fetch(SUPABASE_URL + '/rest/v1/app_data', {
+      res = await _fetchT(SUPABASE_URL + '/rest/v1/app_data', {
         method: 'POST',
         headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal'},
         body: JSON.stringify({id: RECORD_ID, data: toSave})
-      });
+      }, 60000);
     }
     if (res && res.ok) {
       state._lastSaved = toSave._lastSaved;
+      window._remoteTsBekannt = String(toSave._lastSaved); // v7.9.3
+      window._uploadAusstehend = false;
+      uploadOk = true;
       _nachUploadUebernehmen(toSave); // v7.9: Neues vom anderen Handy direkt uebernehmen
       updateSyncStatus('✓ ' + new Date().toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'}));
     } else {
+      window._uploadAusstehend = true; // v7.9.3: beim naechsten Pruefen nachholen
       updateSyncStatus('⚠️ Lokal gespeichert');
     }
   } catch(e) {
+    window._uploadAusstehend = true; // v7.9.3
     updateSyncStatus('⚠️ Offline');
   } finally {
     if(versuch===0){
@@ -1719,6 +1780,7 @@ async function saveToSupabase(versuch){
       if(window._uploadNochmal){ window._uploadNochmal = false; setTimeout(function(){ saveToSupabase(); }, 300); }
     }
   }
+  return uploadOk;
 }
 
 // v7.9: Nach erfolgreichem Upload den zusammengefuehrten Stand lokal uebernehmen
@@ -1741,14 +1803,333 @@ function _anhaengeWiederherstellen(){
   (state.auftraege||[]).forEach(function(a){
     if(!a.sigData){ try{ const sig=localStorage.getItem('fuchs_sig_'+a.id); if(sig) a.sigData=sig; }catch(e){} }
     if(a.sigData) a.signiert = true;
-    try{ const fotos=localStorage.getItem('fuchs_fotos_'+a.id); if(fotos && (!a.fotos || !a.fotos.length)) a.fotos=JSON.parse(fotos); }catch(e){}
+    try{ const fotos=_fotoLesenJSON(a.id); if(fotos && (!a.fotos || !a.fotos.length)) a.fotos=JSON.parse(fotos); }catch(e){}
   });
 }
 function _ansichtenAktualisieren(){
   try{ renderKunden(); renderAuftraege(); updateDashboard(); }catch(e){}
   try{
-    if(typeof aktiverBenutzer!=='undefined' && aktiverBenutzer && aktiverBenutzer.rolle!=='chef' && !maAktivAuftragId) maAuftraegeRendern();
+    if(typeof aktiverBenutzer!=='undefined' && aktiverBenutzer && aktiverBenutzer.rolle!=='chef') maListeAktualisierenWennRuhig(); // v7.9.4
   }catch(e){}
+}
+
+// ══════════════════════════════════════════
+// v7.9.3: Datenmenge klein halten + Unterschriften retten
+// ══════════════════════════════════════════
+// Was von einem Auftrag in die Cloud geht: keine Fotos, kein Protokoll-HTML
+// (wurde nirgends gelesen, enthielt aber Logo + alle Fotos), Unterschrift immer.
+function _fuerCloud(a){
+  const c = {...a, fotos:[], sigData: a.sigData||null};
+  delete c.pdfHtml;
+  return c;
+}
+// v7.9.4: welche Fassung der Einstellungen ist neuer? (beiGleichstandRemote: altes Verhalten ohne Zeitstempel)
+function _einstellungenNeuer(remote, lokal, beiGleichstandRemote){
+  const ru = (remote && remote._u) || 0, lu = (lokal && lokal._u) || 0;
+  if(ru !== lu) return ru > lu;
+  return !!beiGleichstandRemote;
+}
+// Unterschrift aus altem Protokoll-HTML zurueckholen (fuer bereits verlorene)
+function _sigAusPdfHtml(a){
+  if(!a || a.sigData || !a.pdfHtml) return false;
+  const m = String(a.pdfHtml).match(/<img src="(data:image\/[a-zA-Z]+;base64,[^"]+)" style="max-width:300px;max-height:120px;/);
+  if(!m) return false;
+  a.sigData = m[1]; a.signiert = true;
+  try{ localStorage.setItem('fuchs_sig_'+a.id, a.sigData); }catch(e){}
+  return true;
+}
+// Rettet Unterschriften und entfernt danach das ungenutzte Protokoll-HTML
+function _pdfHtmlAufraeumen(liste){
+  let gerettet = 0, entfernt = 0;
+  (liste||[]).forEach(function(a){
+    if(!a) return;
+    if(_sigAusPdfHtml(a)) gerettet++;
+    if(a.pdfHtml !== undefined){ delete a.pdfHtml; entfernt++; }
+  });
+  return {gerettet: gerettet, entfernt: entfernt};
+}
+// Leichte Pruefung alle 30 s: nur den Zeitstempel der Cloud abfragen (wenige Bytes)
+// und den ganzen Datenbestand NUR laden, wenn sich etwas geaendert hat.
+window._remoteTsBekannt = null;
+window._uploadAusstehend = false;
+let _pruefenLaeuft = false;
+function _cloudFehlerText(status){
+  if(status===402||status===429) return '⚠️ Cloud gesperrt (Kontingent) – lokal gespeichert';
+  if(status===401||status===403) return '⚠️ Cloud verweigert Zugriff – lokal gespeichert';
+  return '⚠️ Cloud-Fehler ' + status + ' – lokal gespeichert';
+}
+async function syncPruefen(){
+  if(document.hidden || _pruefenLaeuft) return;
+  _pruefenLaeuft = true;
+  try{
+    // Konnte ein Upload nicht gesendet werden -> jetzt nachholen
+    if(window._uploadAusstehend && !window._uploadLaeuft && !saveTimeout){ await saveToSupabase(); }
+    const res = await _fetchT(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID + '&select=ts:data->_lastSaved', {
+      headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY}
+    }, 15000);
+    if(!res.ok){ updateSyncStatus(_cloudFehlerText(res.status)); return; }
+    const rows = await res.json();
+    const ts = (rows && rows.length) ? String(rows[0].ts) : null;
+    if(ts === null || ts !== window._remoteTsBekannt){
+      await syncFromSupabase();
+    } else {
+      updateSyncStatus('✓ Synced ' + new Date().toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'}));
+    }
+  }catch(e){
+    updateSyncStatus('⚠️ Offline');
+  }finally{
+    _pruefenLaeuft = false;
+  }
+}
+
+// ══════════════════════════════════════════
+// v7.9.4: GERAETE-KENNUNG + AUTOMATISCHE UPDATES
+// Jedes Geraet traegt sich mit Name, Version und Zeitpunkt in state.geraete ein
+// (wird mit hochgeladen) - so sieht der Chef, welche Version wo laeuft.
+// Ausserdem prueft die App regelmaessig, ob auf GitHub eine neuere Version liegt,
+// und laedt sich dann selbst neu, sobald niemand gerade etwas eingibt.
+// ══════════════════════════════════════════
+function _geraetId(){
+  try{
+    let id = localStorage.getItem('fuchs_geraet_id');
+    if(!id){ id = 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); localStorage.setItem('fuchs_geraet_id', id); }
+    return id;
+  }catch(e){ return 'unbekannt'; }
+}
+function _geraetTyp(){
+  const ua = navigator.userAgent || '';
+  if(/iPhone/.test(ua)) return 'iPhone';
+  if(/iPad/.test(ua)) return 'iPad';
+  if(/SamsungBrowser/.test(ua)) return 'Android (Samsung-Browser)';
+  if(/Android/.test(ua)) return 'Android (Chrome)';
+  if(/Mac/.test(ua)) return 'Mac';
+  if(/Windows/.test(ua)) return 'Windows';
+  return 'Gerät';
+}
+function _geraeteVereinen(a, b){
+  const out = {};
+  [a,b].forEach(function(g){ if(!g || typeof g!=='object') return; Object.keys(g).forEach(function(k){ const e=g[k]; if(e && (!out[k] || (e.zeit||0) > (out[k].zeit||0))) out[k]=e; }); });
+  // Eintraege aelter als 90 Tage weglassen
+  const grenze = Date.now() - 90*24*3600*1000;
+  Object.keys(out).forEach(function(k){ if((out[k].zeit||0) < grenze) delete out[k]; });
+  return out;
+}
+// Eigenen Eintrag setzen; liefert true, wenn er sich (bis auf die Zeit) geaendert hat oder aelter als 6 Std. ist
+function _geraetMelden(){
+  if(!state.geraete || typeof state.geraete!=='object') state.geraete = {};
+  const id = _geraetId(), alt = state.geraete[id];
+  const name = (typeof aktiverBenutzer!=='undefined' && aktiverBenutzer && aktiverBenutzer.name) ? aktiverBenutzer.name : (alt && alt.name) || '–';
+  const neu = {name:name, version:APP_VERSION, typ:_geraetTyp(), zeit:Date.now()};
+  const wichtig = !alt || alt.version!==neu.version || alt.name!==neu.name || (Date.now()-(alt.zeit||0)) > 6*3600*1000;
+  if(wichtig) state.geraete[id] = neu;
+  return wichtig;
+}
+function renderGeraete(){
+  const el = document.getElementById('geraete-liste'); if(!el) return;
+  const g = state.geraete || {}, eigene = _geraetId();
+  const liste = Object.keys(g).map(k=>Object.assign({id:k}, g[k])).sort((a,b)=>(b.zeit||0)-(a.zeit||0));
+  if(!liste.length){ el.innerHTML='<div class="empty" style="font-size:13px;">Noch keine Geräte gemeldet – jedes Gerät meldet sich ab v7.9.4 selbst.</div>'; return; }
+  el.innerHTML = liste.map(e=>{
+    const aktuell = e.version===APP_VERSION;
+    const d = new Date(e.zeit||0);
+    const wann = d.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit'})+' '+d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
+    return `<div class="list-item"><div style="flex:1;min-width:0;"><div style="font-weight:600;">${fxEsc(e.name||'–')}${e.id===eigene?' <span style="font-size:11px;color:var(--text3);">(dieses Gerät)</span>':''}</div><div style="font-size:12px;color:var(--text2);">${fxEsc(e.typ||'')} · zuletzt ${fxEsc(wann)}</div></div><span class="badge ${aktuell?'green':'amber'}">${fxEsc(e.version||'?')}${aktuell?' ✓':' – alt'}</span></div>`;
+  }).join('');
+}
+let _updatePruefungLaeuft = false;
+window._neueVersion = null;
+async function updatePruefen(){
+  if(_updatePruefungLaeuft || document.hidden || !/^https?:/.test(location.protocol)) return;
+  _updatePruefungLaeuft = true;
+  try{
+    const r = await _fetchT(location.pathname + '?update=' + Date.now(), {cache:'no-store'}, 15000);
+    if(!r.ok) return;
+    const t = await r.text();
+    const m = t.match(/const APP_VERSION = '([^']+)'/);
+    if(m && m[1] && m[1] !== APP_VERSION){ window._neueVersion = m[1]; updateEinspielenWennRuhig(); }
+  }catch(e){}
+  finally{ _updatePruefungLaeuft = false; }
+}
+function updateEinspielenWennRuhig(){
+  if(!window._neueVersion) return;
+  // nicht mitten in der Arbeit neu laden
+  const ae = document.activeElement;
+  const tippt = ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
+  const offenesFenster = document.getElementById('ma-sig-modal') || (document.getElementById('sig-modal') && document.getElementById('sig-modal').style.display==='flex');
+  if(tippt || offenesFenster || saveTimeout || window._uploadLaeuft || window._uploadAusstehend){
+    _updateHinweisZeigen(); return;
+  }
+  // Schutz gegen Neuladen-Schleife: wurde in den letzten 15 Min. schon neu geladen und die
+  // Version ist trotzdem alt (Zwischenspeicher), nur Hinweis zeigen
+  try{
+    const v = JSON.parse(sessionStorage.getItem('fuchs_update_versuch')||'null');
+    if(v && v.von===APP_VERSION && Date.now()-v.zeit < 15*60*1000){ _updateHinweisZeigen(); return; }
+    sessionStorage.setItem('fuchs_update_versuch', JSON.stringify({von:APP_VERSION, zeit:Date.now()}));
+  }catch(e){}
+  _updateLaden();
+}
+function _updateLaden(){
+  try{ baustelleSichern(); }catch(e){}
+  // eigene Adresse mit Versionsnummer -> umgeht den Zwischenspeicher des Browsers
+  location.replace(location.pathname + '?v=' + encodeURIComponent(window._neueVersion || Date.now()));
+}
+function _updateHinweisZeigen(){
+  if(document.getElementById('update-hinweis')) return;
+  const d = document.createElement('div');
+  d.id = 'update-hinweis';
+  d.style.cssText = 'position:fixed;left:12px;right:12px;bottom:90px;z-index:300000;background:#111;color:#fff;border-radius:14px;padding:12px 14px;display:flex;align-items:center;gap:10px;box-shadow:0 6px 24px rgba(0,0,0,0.35);font-size:14px;';
+  d.innerHTML = '<div style="flex:1;">🔄 Neue Version <b>'+fxEsc(window._neueVersion)+'</b> verfügbar</div><button style="background:#fff;color:#000;border:none;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer;">Jetzt laden</button>';
+  d.querySelector('button').onclick = _updateLaden;
+  document.body.appendChild(d);
+}
+document.addEventListener('visibilitychange', function(){ if(!document.hidden){ if(window._neueVersion) updateEinspielenWennRuhig(); else updatePruefen(); } });
+setInterval(updatePruefen, 15*60*1000);
+
+// ══════════════════════════════════════════
+// v7.9.4: Bilder verkleinern (Unterschrift, Logo) - haelt den Datenbestand klein
+// ══════════════════════════════════════════
+function _bildVerkleinern(dataUrl, maxW, typ, qual){
+  return new Promise(function(res){
+    try{
+      const img=new Image();
+      img.onload=function(){
+        try{
+          const s=Math.min(1, maxW/img.width);
+          const c=document.createElement('canvas');
+          c.width=Math.max(1,Math.round(img.width*s)); c.height=Math.max(1,Math.round(img.height*s));
+          const x=c.getContext('2d');
+          if(typ==='image/jpeg'){ x.fillStyle='#ffffff'; x.fillRect(0,0,c.width,c.height); }
+          x.drawImage(img,0,0,c.width,c.height);
+          res(c.toDataURL(typ,qual));
+        }catch(e){ res(dataUrl); }
+      };
+      img.onerror=function(){ res(dataUrl); };
+      img.src=dataUrl;
+    }catch(e){ res(dataUrl); }
+  });
+}
+const SIG_GRENZE = 30000; // Zeichen; verkleinerte Unterschrift ~15.000
+function _sigKlein(dataUrl){ return _bildVerkleinern(dataUrl, 600, 'image/jpeg', 0.7); }
+// Grosse Unterschriften (alte Versionen) einmal verkleinern
+async function _unterschriftenVerkleinern(){
+  if(window._sigVerkleinernLaeuft) return;
+  window._sigVerkleinernLaeuft = true;
+  let n = 0;
+  try{
+    for(const a of (state.auftraege||[])){
+      if(a && typeof a.sigData==='string' && a.sigData.length > SIG_GRENZE){
+        const k = await _sigKlein(a.sigData);
+        if(k && k.length < a.sigData.length){
+          a.sigData = k;
+          a._u = Date.now(); // als neuer markieren, sonst gewinnt beim Zusammenfuehren die grosse Cloud-Version
+          try{ localStorage.setItem('fuchs_sig_'+a.id, k); }catch(e){}
+          n++;
+        }
+      }
+    }
+  }catch(e){}
+  window._sigVerkleinernLaeuft = false;
+  if(n) save();
+  return n;
+}
+
+// ══════════════════════════════════════════
+// v7.9.4: FOTO-SPEICHER (IndexedDB statt localStorage)
+// localStorage fasst nur ~5 MB - nach ca. 80 Fotos war er voll und die App
+// konnte danach STILL gar nichts mehr lokal speichern. IndexedDB fasst ein
+// Vielfaches. Alle Fotos liegen zusaetzlich im Arbeitsspeicher (_fotoCache),
+// damit der restliche Code wie bisher synchron darauf zugreifen kann.
+// ══════════════════════════════════════════
+const _fotoCache = new Map();
+let _fotoDb = null;
+function _fotoDbOeffnen(){
+  return new Promise(function(res){
+    try{
+      if(!window.indexedDB) return res(null);
+      const rq = indexedDB.open('fuchs_fotos', 1);
+      rq.onupgradeneeded = function(){ try{ rq.result.createObjectStore('fotos'); }catch(e){} };
+      rq.onsuccess = function(){ res(rq.result); };
+      rq.onerror = function(){ res(null); };
+      rq.onblocked = function(){ res(null); };
+    }catch(e){ res(null); }
+  });
+}
+function _fotoDbLaden(){
+  const arbeit = (async function(){
+    _fotoDb = await _fotoDbOeffnen();
+    if(_fotoDb){
+      await new Promise(function(res){
+        try{
+          const tx = _fotoDb.transaction('fotos','readonly'), st = tx.objectStore('fotos');
+          const rq = st.openCursor();
+          rq.onsuccess = function(){ const c = rq.result; if(c){ _fotoCache.set(String(c.key), c.value); c.continue(); } else res(); };
+          rq.onerror = function(){ res(); };
+        }catch(e){ res(); }
+      });
+    }
+    // Alte Fotos aus localStorage uebernehmen und dort freigeben
+    try{
+      const keys = [];
+      for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k && k.indexOf('fuchs_fotos_')===0) keys.push(k); }
+      keys.forEach(function(k){
+        const id = k.slice('fuchs_fotos_'.length);
+        try{
+          const arr = JSON.parse(localStorage.getItem(k)||'[]');
+          if(arr && arr.length && !_fotoCache.has(id)) _fotoCache.set(id, arr);
+        }catch(e){}
+      });
+      // Erst wenn IndexedDB das Schreiben bestaetigt hat, localStorage freigeben
+      if(_fotoDb && keys.length){
+        const fertig = await new Promise(function(res){
+          try{
+            const tx = _fotoDb.transaction('fotos','readwrite'), st = tx.objectStore('fotos');
+            keys.forEach(function(k){ const id=k.slice('fuchs_fotos_'.length); const arr=_fotoCache.get(id); if(arr && arr.length) st.put(arr, id); });
+            tx.oncomplete = function(){ res(true); }; tx.onerror = function(){ res(false); }; tx.onabort = function(){ res(false); };
+          }catch(e){ res(false); }
+        });
+        if(fertig) keys.forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
+      }
+      // Fotos der laufenden Baustelle ebenfalls umziehen
+      const rb = localStorage.getItem('fuchs_aktive_baustelle');
+      if(rb && _fotoDb){
+        const sb = JSON.parse(rb);
+        if(sb && sb.fotos && sb.fotos.length){ _fotoCache.set('baustelle', sb.fotos); _fotoDbPut('baustelle', sb.fotos); sb.fotos = []; localStorage.setItem('fuchs_aktive_baustelle', JSON.stringify(sb)); }
+      }
+    }catch(e){}
+  })();
+  // Nie laenger als 3 s auf den Speicher warten
+  return Promise.race([arbeit.catch(function(){}), new Promise(function(r){ setTimeout(r, 3000); })]);
+}
+function _fotoDbPut(id, arr){
+  if(!_fotoDb) return false;
+  try{
+    const tx = _fotoDb.transaction('fotos','readwrite');
+    if(arr && arr.length) tx.objectStore('fotos').put(arr, String(id));
+    else tx.objectStore('fotos').delete(String(id));
+    return true;
+  }catch(e){ return false; }
+}
+// Gibt die Fotos als JSON-Text zurueck (wie frueher localStorage.getItem) oder null
+function _fotoLesenJSON(id){
+  const arr = _fotoCache.get(String(id));
+  if(arr && arr.length) return JSON.stringify(arr);
+  if(!_fotoDb){ try{ return localStorage.getItem('fuchs_fotos_'+id); }catch(e){ return null; } }
+  return null;
+}
+// Schreibt nur, wenn sich etwas geaendert hat
+function _fotoSchreiben(id, arr){
+  const key = String(id), alt = _fotoCache.get(key);
+  const neu = (arr && arr.length) ? arr : null;
+  if(!neu && !alt) return;
+  if(neu && alt && alt.length===neu.length && alt.every(function(x,i){ return x===neu[i]; })) return;
+  if(neu) _fotoCache.set(key, neu.slice()); else _fotoCache.delete(key);
+  if(!_fotoDbPut(key, neu) && neu){ try{ localStorage.setItem('fuchs_fotos_'+key, JSON.stringify(neu)); }catch(e){ _speicherVollMelden(); } }
+}
+let _speicherVollGemeldet = false;
+function _speicherVollMelden(){
+  try{ updateSyncStatus('⚠ Gerätespeicher voll'); }catch(e){}
+  if(_speicherVollGemeldet) return; _speicherVollGemeldet = true;
+  setTimeout(function(){ alert('⚠ Der Speicher dieses Geräts ist voll – neue Änderungen werden hier gerade nicht gesichert.\n\nBitte unter Einstellungen „⬇ Backup exportieren“ und Fuchs informieren.'); }, 50);
 }
 
 async function load() {
@@ -1758,14 +2139,14 @@ async function load() {
     if (d) { const p = JSON.parse(d); Object.assign(state, p); }
     // Logo aus separatem Key wiederherstellen falls nötig
     const savedLogo = localStorage.getItem('fuchs_logo');
-    if(savedLogo && !(state.settings && state.settings.logoData)) {
+    if(savedLogo && !(state.settings && state.settings.logoData) && !(state.settings && state.settings._u)) { // v7.9.4
       if(!state.settings) state.settings = {};
       state.settings.logoData = savedLogo;
     }
     // Fotos + Signaturen aus separatem Storage wiederherstellen
     state.auftraege.forEach(a=>{
       try{
-        const fotos=localStorage.getItem('fuchs_fotos_'+a.id);
+        const fotos=_fotoLesenJSON(a.id);
         if(fotos&&(!a.fotos||!a.fotos.length)) a.fotos=JSON.parse(fotos);
       }catch(e){}
       try{
@@ -1789,22 +2170,34 @@ async function load() {
     }
   } catch(e) {}
   _hashesNeuSetzen(); // v7.9: geladener Stand gilt als unveraendert
+  // v7.9.3: Unterschriften aus altem Protokoll-HTML retten, Protokoll-HTML entfernen.
+  // Nach _hashesNeuSetzen, damit gerettete Unterschriften als Aenderung hochgeladen werden.
+  let _ladeAufr = {gerettet:0, entfernt:0};
+  try{ _ladeAufr = _pdfHtmlAufraeumen(state.auftraege); if(_ladeAufr.entfernt) lokalSpeichern(); }catch(e){}
 
+  // v7.9.4: Anmeldung SOFORT mit den Daten im Geraet pruefen - nicht erst nach der Cloud.
+  // Sonst war bei langsamem Netz die Chef-Oberflaeche auf dem Mitarbeiter-Handy offen.
+  try{ loginInit(); window._loginGeprueft = true; }catch(e){}
   // Dann aus Supabase laden (aktuellste Daten)
   updateSyncStatus('⟳ Lade...');
   await syncFromSupabase();
+  try{ if(aktiverBenutzer && aktiverBenutzer.rolle!=='chef') maAuftraegeRendern(); }catch(e){}
 
-  // Automatische Synchronisation alle 30 Sekunden
-  setInterval(async () => {
-    await syncFromSupabase();
-  }, 30000);
+  if(_ladeAufr.gerettet) save(); // gerettete Unterschriften in die Cloud
+  try{ if(_geraetMelden()) save(); }catch(e){} // v7.9.4: Version an die Cloud melden
+  setTimeout(updatePruefen, 5000); // v7.9.4
+  _unterschriftenVerkleinern(); // v7.9.4
+  // v7.9.3: alle 30 Sekunden nur leicht pruefen (Mitarbeiter-Ansicht hat eigenen Takt)
+  setInterval(() => { if(!window._maAutoSync) syncPruefen(); }, 30000);
 }
 
 async function syncFromSupabase() {
   try {
-    const res = await fetch(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
+    const res = await _fetchT(SUPABASE_URL + '/rest/v1/app_data?id=eq.' + RECORD_ID, {
       headers: {'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY}
-    });
+    }, 90000);
+    // v7.9.4: Fehlerantwort (z.B. Sperre wegen Kontingent) nicht als "Bereit" anzeigen
+    if(!res.ok){ updateSyncStatus(_cloudFehlerText(res.status)); return; }
     const rows = await res.json();
     if (rows && rows.length > 0 && rows[0].data) {
       const remote = rows[0].data;
@@ -1835,9 +2228,15 @@ async function syncFromSupabase() {
           const einfach = Object.assign({}, remote);
           SYNC_LISTEN.forEach(function(l){ delete einfach[l]; });
           delete einfach.geloescht;
+          delete einfach.settings; // v7.9.4: Einstellungen separat (unten)
           Object.assign(state, einfach);
         }
+        // v7.9.4: Einstellungen - die zuletzt geaenderte Fassung gewinnt
+        if(remote.settings && _einstellungenNeuer(remote.settings, state.settings, remoteTs >= localTs)){
+          state.settings = Object.assign({}, remote.settings);
+        }
         state.geloescht = _geloeschtVereinen(lokalGeloescht, remote.geloescht);
+        state.geraete = _geraeteVereinen(state.geraete, remote.geraete); // v7.9.4
         let korrekturNoetig = _geloeschtMehrAls(state.geloescht, remote.geloescht) || nrLokal > (remote.auftragNr||0);
         state.auftragNr = Math.max(nrLokal, remote.auftragNr||0);
         state.rechnungNr = Math.max(rnrLokal, remote.rechnungNr||0);
@@ -1847,6 +2246,8 @@ async function syncFromSupabase() {
           if(erg.lokalNeuer) korrekturNoetig = true;
         });
 
+        // v7.9.3: Unterschriften aus altem Protokoll-HTML retten, Protokoll-HTML entfernen
+        try{ if(_pdfHtmlAufraeumen(state.auftraege).gerettet) korrekturNoetig = true; }catch(e){}
         // Fotos nach Sync wiederherstellen
         // sigData: lokalen State behalten wenn Supabase null hat
         state.auftraege.forEach(a=>{
@@ -1869,13 +2270,13 @@ async function syncFromSupabase() {
           }catch(e){}
           // Fotos wiederherstellen
           try{
-            const fotos = localStorage.getItem('fuchs_fotos_'+a.id);
+            const fotos = _fotoLesenJSON(a.id);
             if(fotos && (!a.fotos || !a.fotos.length)) a.fotos = JSON.parse(fotos);
           }catch(e){}
         });
 
         // Logo wiederherstellen
-        if(localLogoData && !(state.settings && state.settings.logoData)) {
+        if(localLogoData && !(state.settings && state.settings.logoData) && !(state.settings && state.settings._u)) { // v7.9.4: bewusst entferntes Logo nicht zurueckholen
           if(!state.settings) state.settings = {};
           state.settings.logoData = localLogoData;
         }
@@ -1897,6 +2298,7 @@ async function syncFromSupabase() {
         updateRechnungenSelect();
         annehmenMitarbeiterUpdate(); // Nur MA-Liste aktualisieren, nicht Felder löschen
         renderZugaenge();
+        try{ renderGeraete(); }catch(e){}
         // v7.9: zusammengefuehrter Stand gilt als unveraendert (kein Neu-Stempeln)
         _hashesNeuSetzen();
         if (remoteTs >= localTs || (_syncSignatur() + '#' + JSON.stringify(state.geloescht||{})) !== signaturVorher) lokalSpeichern();
@@ -1906,7 +2308,13 @@ async function syncFromSupabase() {
         // Login-Screen nach Sync aktualisieren
         const loginScreen = document.getElementById('login-screen');
         if(loginScreen && loginScreen.style.display !== 'none') {
-          loginInit();
+          // v7.9.4: nur Liste/Logo auffrischen, eingetippten Benutzernamen NICHT loeschen
+          try{
+            const logo = state.settings && state.settings.logoData;
+            ['login-logo','ma-logo'].forEach(id=>{ const el=document.getElementById(id); if(el&&logo) el.innerHTML=`<img src="${logo}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`; });
+            const bn=document.getElementById('login-benutzername');
+            if(bn && bn.value) loginBenutzerSuchen(bn.value);
+          }catch(e){}
         }
         // Gespeicherten Login nach Sync prüfen (für Mitarbeiter-Handy)
         if(!aktiverBenutzer) {
@@ -1923,6 +2331,8 @@ async function syncFromSupabase() {
             }
           } catch(e) {}
         }
+        window._remoteTsBekannt = String(remoteTs); // v7.9.3: diesen Cloud-Stand kennen wir jetzt
+        setTimeout(_unterschriftenVerkleinern, 500); // v7.9.4: grosse Unterschriften von alten Geraeten verkleinern
         updateSyncStatus('✓ Synced ' + new Date().toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'}));
       }
     } else {
@@ -2130,6 +2540,7 @@ function sigModalSpeichern(){
     // Dann Unterschrift drüber zeichnen
     tempCtx.drawImage(canvas, 0, 0);
     sigDataURL=tempCanvas.toDataURL('image/jpeg', 0.9);
+    _sigKlein(sigDataURL).then(function(k){ sigDataURL=k; const p2=document.getElementById('sig-preview-img'); if(p2) p2.src=k; try{baustelleSichern();}catch(e){} }); // v7.9.4
     const pi=document.getElementById('sig-preview-img');
     if(pi){pi.src=sigDataURL;pi.style.display='block';}
     const pt=document.getElementById('sig-preview-text');
@@ -2215,9 +2626,9 @@ function kundeAnlegen(){
 }
 function renderKunden(filter=''){
   const el=document.getElementById('kunden-liste');
-  const f=state.kunden.filter(k=>(k.vorname+' '+k.nachname+' '+k.ort+' '+(k.firma||'')).toLowerCase().includes(filter.toLowerCase()));
+  const f=state.kunden.filter(k=>[k.vorname,k.nachname,k.ort,k.firma,k.strasse,k.plz,k.tel,k.email,k.objekt].map(x=>x||'').join(' ').toLowerCase().includes(filter.toLowerCase())); // v7.9.4: auch Tel/E-Mail/Strasse
   if(!f.length){el.innerHTML='<div class="empty">Keine Kunden gefunden</div>';return;}
-  el.innerHTML=f.map(k=>`<div class="list-item" style="cursor:pointer;" onclick="kundeOeffnen(${k.id})"><div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;"><div class="avatar">${fxEsc(fxInitialen(k))}</div><div style="min-width:0;"><div style="font-weight:600;">${k.firma?k.firma:''}${k.firma&&(k.vorname||k.nachname)?'<br><span style="font-size:11px;color:var(--text2);">'+k.vorname+' '+k.nachname+'</span>':(!k.firma?k.vorname+' '+k.nachname:'')}</div><div style="font-size:12px;color:var(--text2);">${k.strasse?k.strasse+', ':''}${k.plz} ${k.ort}</div>${k.objekt?`<div style="font-size:11px;color:var(--text3);">${k.objekt}</div>`:''}</div></div><div style="display:flex;align-items:center;gap:6px;flex-shrink:0;" onclick="event.stopPropagation();">${k.wartung?`<span class="badge blue">${k.wartung==='jaehrlich'?'Jährl.':'Halbj.'}</span>`:''}<button class="btn sm primary" onclick="kundeOeffnen(${k.id})">👤 Details</button><button class="btn sm danger" onclick="kundeLoeschen(${k.id})">✕</button></div></div>`).join('');
+  el.innerHTML=f.map(k=>`<div class="list-item" style="cursor:pointer;" onclick="kundeOeffnen(${k.id})"><div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;"><div class="avatar">${fxEsc(fxInitialen(k))}</div><div style="min-width:0;"><div style="font-weight:600;">${k.firma?fxEsc(k.firma):''}${k.firma&&fxKundeName(k)?'<br><span style="font-size:11px;color:var(--text2);">'+fxEsc(fxKundeName(k))+'</span>':(!k.firma?fxEsc(fxKundeName(k)):'')}</div><div style="font-size:12px;color:var(--text2);">${k.strasse?fxEsc(k.strasse)+', ':''}${fxEsc(k.plz||'')} ${fxEsc(k.ort||'')}</div>${k.objekt?`<div style="font-size:11px;color:var(--text3);">${fxEsc(k.objekt)}</div>`:''}</div></div><div style="display:flex;align-items:center;gap:6px;flex-shrink:0;" onclick="event.stopPropagation();">${k.wartung?`<span class="badge blue">${k.wartung==='jaehrlich'?'Jährl.':'Halbj.'}</span>`:''}<button class="btn sm primary" onclick="kundeOeffnen(${k.id})">👤 Details</button><button class="btn sm danger" onclick="kundeLoeschen(${k.id})">✕</button></div></div>`).join('');
 }
 
 function kundeOeffnen(id){
@@ -2342,10 +2753,10 @@ function updateSelects(){
   ['b-kunde','t-kunde'].forEach(sid=>{
     const s=document.getElementById(sid);if(!s)return;
     const first=sid==='b-kunde'?'<option value="">Kunde wählen...</option>':'<option value="">Kein Kunde</option>';
-    s.innerHTML=first+state.kunden.map(k=>`<option value="${k.id}">${k.vorname} ${k.nachname}${k.objekt?' – '+k.objekt:''}</option>`).join('');
+    s.innerHTML=first+state.kunden.map(k=>`<option value="${fxEsc(k.id)}">${fxEsc(kundeAnzeigeName(k))}${k.objekt?' – '+fxEsc(k.objekt):''}</option>`).join('');
   });
   const ms=document.getElementById('b-mitarbeiter');
-  if(ms)ms.innerHTML='<option value="">Mitarbeiter wählen...</option>'+state.mitarbeiter.map(m=>`<option value="${m.id}">${m.vorname} ${m.nachname} (${m.rolle})</option>`).join('');
+  if(ms)ms.innerHTML='<option value="">Mitarbeiter wählen...</option>'+state.mitarbeiter.map(m=>`<option value="${fxEsc(m.id)}">${fxEsc(m.vorname)} ${fxEsc(m.nachname)} (${fxEsc(m.rolle)})</option>`).join('');
 }
 
 // BAUSTELLE
@@ -2357,13 +2768,18 @@ function baustelleSichern(){
       aktiveBaustelle: state.aktiveBaustelle,
       timerStart: state.timerStart,
       materialien: state.materialien||[],
-      fotos: state.fotos||[],
+      fotos: _fotoDb ? [] : (state.fotos||[]), // v7.9.4: Fotos liegen in IndexedDB
+      doku: (document.getElementById('b-doku')||{}).value||'',
+      intern: (document.getElementById('b-intern')||{}).value||'',
+      fahrtzeit: (document.getElementById('b-fahrtzeit')||{}).value||'',
+      signer: (document.getElementById('b-signer-name')||{}).value||'',
       arbeitszeitManuellWert: arbeitszeitManuellWert,
       sigDataURL: sigDataURL,
       pausiert: !!state._pausiert,
       pausedAt: state._pausedAt || null,
       timestamp: Date.now()
     };
+    if(_fotoDb) _fotoSchreiben('baustelle', state.fotos||[]);
     localStorage.setItem('fuchs_aktive_baustelle', JSON.stringify(sicherung));
   }catch(e){}
 }
@@ -2381,6 +2797,7 @@ function baustelleSicherungLoeschen(){
   state._pausiert = false;
   state._pausedAt = null;
   try{ localStorage.removeItem('fuchs_aktive_baustelle'); }catch(e){}
+  _fotoSchreiben('baustelle', []); // v7.9.4
 }
 
 function baustelleWiederherstellen(){
@@ -2394,8 +2811,18 @@ function baustelleWiederherstellen(){
     state.aktiveBaustelle = s.aktiveBaustelle;
     state.timerStart = s.timerStart;
     state.materialien = s.materialien||[];
-    state.fotos = s.fotos||[];
+    state.fotos = (s.fotos&&s.fotos.length) ? s.fotos : ((_fotoCache.get('baustelle')||[]).slice());
+    // v7.9.4: Texte, Fotos und Material wieder anzeigen
+    try{
+      const setz=(id,v)=>{ const el=document.getElementById(id); if(el && v!=null) el.value=v; };
+      setz('b-doku', s.doku); setz('b-intern', s.intern); setz('b-fahrtzeit', s.fahrtzeit); setz('b-signer-name', s.signer);
+      const g=document.getElementById('foto-grid');
+      if(g) g.innerHTML=state.fotos.map(f=>`<div class="photo-thumb"><img src="${f}" alt="Foto"></div>`).join('');
+      const ml=document.getElementById('material-liste');
+      if(ml) ml.innerHTML=state.materialien.map(m=>`<div class="list-item"><span>${fxEsc(m.name)}</span><span style="color:var(--text2);">${fxEsc(m.menge)}</span></div>`).join('');
+    }catch(e){}
     arbeitszeitManuellWert = s.arbeitszeitManuellWert;
+    try{ const am=document.getElementById('b-arbeitszeit-manuell'); if(am) am.value = (arbeitszeitManuellWert!=null && !isNaN(arbeitszeitManuellWert)) ? Number(arbeitszeitManuellWert).toFixed(2) : ''; }catch(e){}
     sigDataURL = s.sigDataURL;
     state._pausiert = !!s.pausiert;
     state._pausedAt = s.pausedAt || null;
@@ -2421,7 +2848,7 @@ function baustelleWiederherstellen(){
     document.getElementById('baustelle-aktiv-card').style.display='block';
     
     const info = document.getElementById('b-aktiv-info') || document.getElementById('baustelle-aktiv-info');
-    if(info) info.innerHTML=`<strong>${state.aktiveBaustelle.art}</strong> bei <strong>${k.vorname} ${k.nachname}</strong>`;
+    if(info) info.innerHTML=`<strong>${fxEsc(state.aktiveBaustelle.art)}</strong> bei <strong>${fxEsc(kundeAnzeigeName(k))}</strong>`;
     
     const timerEl = document.getElementById('timer-display');
     if(timerEl){
@@ -2442,7 +2869,7 @@ function baustelleWiederherstellen(){
     // Baustelle-Seite anzeigen
     showPage('baustelle');
     
-    alert('Aktive Baustelle wiederhergestellt: '+state.aktiveBaustelle.art+' bei '+k.vorname+' '+k.nachname);
+    alert('Aktive Baustelle wiederhergestellt: '+state.aktiveBaustelle.art+' bei '+kundeAnzeigeName(k));
     return true;
   }catch(e){
     console.error('Baustelle wiederherstellen Fehler:', e);
@@ -2469,7 +2896,7 @@ function baustelleStarten(){
   baustelleSichern(); // Sofort sichern
   document.getElementById('baustelle-start-card').style.display='none';
   document.getElementById('baustelle-aktiv-card').style.display='block';
-  document.getElementById('b-aktiv-info').innerHTML=`<strong>${state.aktiveBaustelle.art}</strong> bei <strong>${kunde.vorname} ${kunde.nachname}</strong>${mitarb?' &middot; '+mitarb.vorname+' '+mitarb.nachname:''}`;
+  document.getElementById('b-aktiv-info').innerHTML=`<strong>${fxEsc(state.aktiveBaustelle.art)}</strong> bei <strong>${fxEsc(kundeAnzeigeName(kunde))}</strong>${mitarb?' &middot; '+fxEsc(mitarb.vorname+' '+mitarb.nachname):''}`;
   document.getElementById('foto-grid').innerHTML='';
   document.getElementById('material-liste').innerHTML='';
   document.getElementById('b-doku').value='';
@@ -2515,7 +2942,8 @@ function arbeitszeitManuell(){
 }
 
 function arbeitszeitAnpassen(delta){
-  const elapsed=(Date.now()-state.timerStart)/3600000;
+  const bis=(state._pausiert&&state._pausedAt)?state._pausedAt:Date.now(); // v7.9.4
+  const elapsed=Math.max(0,(bis-state.timerStart)/3600000);
   const current=arbeitszeitManuellWert!==null?arbeitszeitManuellWert:elapsed;
   const neu=Math.max(0,Math.round((current+delta)*4)/4);
   arbeitszeitManuellWert=neu;
@@ -2569,7 +2997,7 @@ function baustellePause(){
 function fotoHinzufuegen(input){
   Array.from(input.files).forEach(file=>{
     const r=new FileReader();
-    r.onload=e=>{fotoKomprimieren(e.target.result, compressed=>{state.fotos.push(compressed);const g=document.getElementById('foto-grid');const d=document.createElement('div');d.className='photo-thumb';d.innerHTML=`<img src="${compressed}" alt="Foto">`;g.appendChild(d);});};
+    r.onload=e=>{fotoKomprimieren(e.target.result, compressed=>{state.fotos.push(compressed);try{baustelleSichern();}catch(e){}const g=document.getElementById('foto-grid');const d=document.createElement('div');d.className='photo-thumb';d.innerHTML=`<img src="${compressed}" alt="Foto">`;g.appendChild(d);});};
     r.readAsDataURL(file);
   });
 }
@@ -2579,9 +3007,10 @@ function materialHinzufuegen(){
   const m=document.getElementById('mat-menge').value.trim();
   if(!n)return;
   state.materialien.push({name:n,menge:m});
+  try{baustelleSichern();}catch(e){} // v7.9.4: sofort sichern
   const l=document.getElementById('material-liste');
   const d=document.createElement('div');d.className='list-item';
-  d.innerHTML=`<span>${n}</span><span style="color:var(--text2);">${m}</span>`;
+  d.innerHTML=`<span>${fxEsc(n)}</span><span style="color:var(--text2);">${fxEsc(m)}</span>`;
   l.appendChild(d);
   document.getElementById('mat-name').value='';
   document.getElementById('mat-menge').value='';
@@ -2590,13 +3019,15 @@ function materialHinzufuegen(){
 function baustelleBeendenMitOption(option){
   // Speichere Option für nach dem Abschließen
   window._baustelleOption = option;
-  baustelleBeenden();
+  return baustelleBeenden();
 }
 
 async function baustelleBeenden(){
-  if(!confirm('Baustelle abschließen und E-Mail vorbereiten?'))return;
+  if(!confirm('Baustelle abschließen und E-Mail vorbereiten?')){ window._baustelleOption=null; return; }
   clearInterval(state.timerInterval);state.timerInterval=null;
-  const elapsedSek=Math.floor((Date.now()-state.timerStart)/1000);
+  // v7.9.4: in der Pause beendet -> Pausenzeit nicht mitzaehlen
+  const bisZeit=(state._pausiert&&state._pausedAt&&!isNaN(state._pausedAt))?state._pausedAt:Date.now();
+  const elapsedSek=Math.max(0,Math.floor((bisZeit-state.timerStart)/1000));
   const arbeitStd=arbeitszeitManuellWert!==null?arbeitszeitManuellWert:elapsedSek/3600;
   const fahrtStd=parseFloat(document.getElementById('b-fahrtzeit').value)||0;
   const gesamtStd=arbeitStd+fahrtStd;
@@ -2623,10 +3054,11 @@ async function baustelleBeenden(){
     datum,uhrzeit,
     signiert:hasSig,
     sigData: sigDataURL || null,
-    signerName: document.getElementById('b-signer-name')?.value.trim() || (k.vorname+' '+k.nachname),
-    status:'offen',
-    statusLabel:'Offen'
+    signerName: document.getElementById('b-signer-name')?.value.trim() || fxKundeName(k) || k.firma || '',
   };
+  // v7.9.4: die gewaehlte Option wird jetzt ausgewertet
+  statusSetzen(auftrag, window._baustelleOption==='warteschlange' ? 'warteschlange' : 'abgeschlossen');
+  window._baustelleOption = null;
   if(state.aktiveBaustelle && state.aktiveBaustelle.einsatzort) auftrag.einsatzort = state.aktiveBaustelle.einsatzort;
   state.auftragNr++;
   state.auftraege.unshift(auftrag);
@@ -2639,7 +3071,7 @@ async function baustelleBeenden(){
 Datum: ${datum}, ${uhrzeit} Uhr
 
 KUNDE:
-${k.vorname} ${k.nachname}
+${kundeAnzeigeName(k)}
 ${k.strasse||''}${k.plz?' '+k.plz:''} ${k.ort||''}
 ${k.objekt?'Objekt: '+k.objekt:''}
 ${ma?'Mitarbeiter: '+ma.vorname+' '+ma.nachname:''}
@@ -2663,7 +3095,7 @@ ${s.firma||'Kanal- und Rohrreinigung Fuchs'}
 Tel: ${s.tel||'06003/8276464'}
 `;
 
-  const subject=`Auftrag ${nr} – ${auftrag.art} – ${k.vorname} ${k.nachname} – ${datum}`;
+  const subject=`Auftrag ${nr} – ${auftrag.art} – ${kundeAnzeigeName(k)} – ${datum}`;
 
   document.getElementById('baustelle-start-card').style.display='block';
   document.getElementById('baustelle-aktiv-card').style.display='none';
@@ -2684,8 +3116,8 @@ function zeigeAuftragModal(subject, body, nr){
   const modal=document.createElement('div');
   modal.id='auftrag-modal';
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:20000;overflow-y:auto;padding:16px;display:flex;align-items:flex-start;justify-content:center;';
-  const safeSubject=subject.replace(/`/g,"'");
-  const safeBody=encodeURIComponent(body);
+  const safeSubject=fxEsc(subject);
+  window._mailDaten={an:'info@kanal-fuchs.de',betreff:subject,text:body}; // v7.9.4
   modal.innerHTML=`<div style="background:var(--surface);border-radius:var(--radius-lg);width:100%;max-width:680px;padding:20px;margin:auto;margin-top:20px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
       <div style="font-size:15px;font-weight:700;">Auftrag ${nr} gespeichert</div>
@@ -2697,7 +3129,7 @@ function zeigeAuftragModal(subject, body, nr){
     <textarea id="modal-body" style="width:100%;min-height:300px;font-family:monospace;font-size:12px;padding:10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);resize:vertical;" readonly></textarea>
     <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
       <button class="btn primary" onclick="emailKopieren()">📋 Text kopieren</button>
-      <button class="btn success" onclick="window.open('mailto:info@kanal-fuchs.de?subject='+encodeURIComponent('${safeSubject}')+'&body=${safeBody}','_blank')">✉️ E-Mail öffnen</button>
+      <button class="btn success" onclick="mailOeffnen()">✉️ E-Mail öffnen</button>
       <button class="btn" onclick="document.getElementById('auftrag-modal').remove()">Schließen</button>
     </div>
     <p style="font-size:11px;color:var(--text2);margin-top:10px;">Empfänger: <strong>info@kanal-fuchs.de</strong> · Tipp: "Text kopieren" → in Gmail/Outlook einfügen</p>
@@ -2707,6 +3139,11 @@ function zeigeAuftragModal(subject, body, nr){
   document.getElementById('modal-body').value=body;
 }
 
+// v7.9.4: E-Mail-Daten liegen in window._mailDaten - nie mehr als Text im onclick (Apostroph/Zeilenumbruch machten den Knopf kaputt)
+function mailOeffnen(){
+  const m=window._mailDaten; if(!m) return;
+  window.open('mailto:'+encodeURIComponent(m.an||'').replace(/%40/g,'@')+'?subject='+encodeURIComponent(m.betreff||'')+'&body='+encodeURIComponent(m.text||''),'_blank');
+}
 function emailKopieren(){
   const ta=document.getElementById('modal-body');
   if(navigator.clipboard){navigator.clipboard.writeText(ta.value).then(()=>alert('✓ Text kopiert!')).catch(()=>{ta.select();document.execCommand('copy');alert('✓ Text kopiert!');});}
@@ -2716,7 +3153,9 @@ function emailKopieren(){
 // KALENDER
 const MONATE=['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
 const TAGE=['Mo','Di','Mi','Do','Fr','Sa','So'];
-function setDefaultDate(){document.getElementById('t-datum').value=new Date().toISOString().split('T')[0];}
+// v7.9.4: lokales Datum (toISOString ist UTC -> zwischen 0 und 2 Uhr war es der Vortag)
+function _heuteISO(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function setDefaultDate(){document.getElementById('t-datum').value=_heuteISO();}
 function calPrev(){state.calMonth--;if(state.calMonth<0){state.calMonth=11;state.calYear--;}renderCal();}
 function calNext(){state.calMonth++;if(state.calMonth>11){state.calMonth=0;state.calYear++;}renderCal();}
 function renderCal(){
@@ -2756,7 +3195,7 @@ function terminAnlegen(){
   if(!titel||!datum){alert('Bitte Titel und Datum eingeben.');return;}
   const kId=document.getElementById('t-kunde').value;
   const kunde=kId?state.kunden.find(k=>k.id==kId):null;
-  state.termine.push({id:Date.now(),titel,datum,zeit,kunde:kunde?kunde.vorname+' '+kunde.nachname:'',kundeId:kId||null,notiz:document.getElementById('t-notiz').value.trim()});
+  state.termine.push({id:Date.now(),titel,datum,zeit,kunde:kunde?kundeAnzeigeName(kunde):'',kundeId:kId||null,notiz:document.getElementById('t-notiz').value.trim()});
   document.getElementById('t-titel').value='';document.getElementById('t-notiz').value='';
   renderCal();renderAlleTermine();updateDashboard();save();
   // Wartungsvertrag-Erinnerung prüfen
@@ -2770,20 +3209,20 @@ function terminBearbeiten(id){
   const modal=document.createElement('div');
   modal.id='termin-edit-modal';
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:20000;overflow-y:auto;padding:16px;display:flex;align-items:center;justify-content:center;';
-  const kundenOptionen=state.kunden.map(k=>`<option value="${k.id}" ${t.kunde===k.vorname+' '+k.nachname?'selected':''}>${k.vorname} ${k.nachname}</option>`).join('');
+  const kundenOptionen=state.kunden.map(k=>`<option value="${fxEsc(k.id)}" ${(t.kundeId?String(t.kundeId)===String(k.id):(t.kunde===kundeAnzeigeName(k)||t.kunde===k.vorname+' '+k.nachname))?'selected':''}>${fxEsc(kundeAnzeigeName(k))}</option>`).join('');
   modal.innerHTML=`<div style="background:var(--surface);border-radius:16px;width:100%;max-width:500px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
     <div style="background:var(--accent);color:var(--on-accent);padding:14px 16px;display:flex;justify-content:space-between;align-items:center;">
       <div style="font-weight:700;">✏️ Termin bearbeiten</div>
       <button onclick="document.getElementById('termin-edit-modal').remove()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:16px;">✕</button>
     </div>
     <div style="padding:16px;display:flex;flex-direction:column;gap:10px;">
-      <div class="form-group"><label>Titel</label><input id="te-titel" value="${t.titel}"></div>
+      <div class="form-group"><label>Titel</label><input id="te-titel" value="${fxEsc(t.titel)}"></div>
       <div class="form-row">
         <div class="form-group"><label>Datum</label><input id="te-datum" type="date" value="${t.datum}"></div>
         <div class="form-group"><label>Uhrzeit</label><input id="te-zeit" type="time" value="${t.zeit}"></div>
       </div>
       <div class="form-group"><label>Kunde</label><select id="te-kunde"><option value="">Kein Kunde</option>${kundenOptionen}</select></div>
-      <div class="form-group"><label>Notiz</label><textarea id="te-notiz" style="min-height:60px;">${t.notiz||''}</textarea></div>
+      <div class="form-group"><label>Notiz</label><textarea id="te-notiz" style="min-height:60px;">${fxEsc(t.notiz||'')}</textarea></div>
       <div style="display:flex;gap:8px;margin-top:4px;">
         <button class="btn primary" style="flex:1;" onclick="terminSpeichern(${id})">✓ Speichern</button>
         ${t.kundeId?`<button class="btn success" onclick="terminZuBaustelle(${id})">▶ Baustelle starten</button>`:''}
@@ -2802,7 +3241,7 @@ function terminSpeichern(id){
   t.notiz=document.getElementById('te-notiz').value.trim();
   const kId=document.getElementById('te-kunde').value;
   const k=kId?state.kunden.find(x=>x.id==kId):null;
-  t.kunde=k?k.vorname+' '+k.nachname:'';
+  t.kunde=k?kundeAnzeigeName(k):'';
   t.kundeId=kId||null;
   document.getElementById('termin-edit-modal').remove();
   renderCal();renderAlleTermine();updateDashboard();save();
@@ -2825,15 +3264,15 @@ function renderAlleTermine(){
   const el=document.getElementById('alle-termine');
   const sorted=[...state.termine].sort((a,b)=>a.datum.localeCompare(b.datum)||a.zeit.localeCompare(b.zeit));
   if(!sorted.length){el.innerHTML='<div class="empty">Noch keine Termine</div>';return;}
-  const today=new Date().toISOString().split('T')[0];
+  const today=_heuteISO();
   el.innerHTML=sorted.map(t=>{
     const past=t.datum<today;
     const hatAuftrag=t.auftragId&&state.auftraege.find(a=>a.id===t.auftragId);
     return `<div class="list-item" style="${past?'opacity:0.6':''}">
       <div style="flex:1;">
-        <div style="font-weight:600;">${t.titel}</div>
-        <div style="font-size:12px;color:var(--text2);">${new Date(t.datum).toLocaleDateString('de-DE')} um ${t.zeit}${t.kunde?' · '+t.kunde:''}</div>
-        ${t.notiz?`<div style="font-size:11px;color:var(--text3);">${t.notiz}</div>`:''}
+        <div style="font-weight:600;">${fxEsc(t.titel)}</div>
+        <div style="font-size:12px;color:var(--text2);">${new Date(t.datum).toLocaleDateString('de-DE')} um ${fxEsc(t.zeit)}${t.kunde?' · '+fxEsc(t.kunde):''}</div>
+        ${t.notiz?`<div style="font-size:11px;color:var(--text3);">${fxEsc(t.notiz)}</div>`:''}
         ${hatAuftrag?`<span style="font-size:10px;background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:10px;font-weight:700;">📋 ${hatAuftrag.nr}</span>`:''}
       </div>
       <div style="display:flex;gap:5px;flex-shrink:0;">
@@ -2852,8 +3291,8 @@ function renderDayTermineNeu(date){
   const el=document.getElementById('day-termine');
   if(!termine.length){el.innerHTML='<div style="font-size:13px;color:var(--text2);padding:8px 0;">Keine Termine</div>';return;}
   el.innerHTML=termine.map(t=>`<div class="termin-item">
-    <div class="termin-time">${t.zeit}</div>
-    <div class="termin-info"><div class="termin-title">${t.titel}</div>${t.kunde?`<div class="termin-sub">${t.kunde}</div>`:''}${t.notiz?`<div class="termin-sub">${t.notiz}</div>`:''}</div>
+    <div class="termin-time">${fxEsc(t.zeit)}</div>
+    <div class="termin-info"><div class="termin-title">${fxEsc(t.titel)}</div>${t.kunde?`<div class="termin-sub">${fxEsc(t.kunde)}</div>`:''}${t.notiz?`<div class="termin-sub">${fxEsc(t.notiz)}</div>`:''}</div>
     <div style="display:flex;gap:5px;">
       <button class="btn sm" onclick="terminBearbeiten(${t.id})">✏️</button>
       ${t.kundeId?`<button class="btn sm success" onclick="terminZuBaustelle(${t.id})">▶</button>`:''}
@@ -2866,7 +3305,7 @@ function renderDayTermineNeu(date){
 // AUFTRÄGE
 function renderAuftraege(){
   const el=document.getElementById('auftraege-liste');
-  const alleAuftraege=state.auftraege.filter(a=>!a.inWarteschlange&&a.status!=='abgeschlossen'&&a.status!=='archiv'&&a.status!=='geplant');
+  const alleAuftraege=state.auftraege.filter(a=>!a.inWarteschlange&&a.status!=='abgeschlossen'&&a.status!=='abgerechnet'&&a.status!=='archiv'&&a.status!=='geplant'); // v7.9.4: abgerechnete unter "Erledigt"
   if(!alleAuftraege.length){el.innerHTML='<div class="empty">Noch keine Aufträge</div>';return;}
   // Auftrag zuweisen Button in Liste
   const statusColors={'offen':'amber','in_bearbeitung':'blue','abgeschlossen':'green','abgerechnet':'green','geplant':'purple'};
@@ -2888,6 +3327,10 @@ function auftragLoeschen(id){
   if(!confirm('Auftrag wirklich löschen? Dies kann nicht rückgängig gemacht werden.'))return;
   loeschMarkieren('auftraege',id); // v7.9
   state.auftraege=state.auftraege.filter(a=>a.id!=id); // != statt !== für Typ-toleranz
+  // v7.9.4: zugehoerige Kalendertermine mitloeschen
+  (state.termine||[]).filter(t=>t.auftragId!=null&&t.auftragId==id).forEach(t=>loeschMarkieren('termine',t.id));
+  state.termine=(state.termine||[]).filter(t=>!(t.auftragId!=null&&t.auftragId==id));
+  if(typeof renderCal==='function'){ try{renderCal();renderAlleTermine();}catch(e){} }
   if(aktiverAuftraegeTab==='archiv') renderArchiv();
   else if(aktiverAuftraegeTab==='geplant') renderGeplant();
   else if(aktiverAuftraegeTab==='abgeschlossen') renderAbgeschlosseneAuftraege();
@@ -2931,7 +3374,7 @@ function auftragWiederOeffnen(id){
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
       <div style="background:var(--surface2);border-radius:8px;padding:12px;">
         <div style="font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;margin-bottom:6px;">Kunde</div>
-        <div style="font-weight:600;">${k.vorname} ${k.nachname}</div>
+        <div style="font-weight:600;">${fxEsc(kundeAnzeigeName(k))}</div>
         <div style="font-size:13px;color:var(--text2);">${k.strasse||''}</div>
         <div style="font-size:13px;color:var(--text2);">${k.plz||''} ${k.ort||''}</div>
         ${k.tel?`<div style="font-size:13px;color:var(--text2);margin-top:4px;">Tel: ${k.tel}</div>`:''}
@@ -2997,8 +3440,9 @@ function auftragWiederOeffnen(id){
   const modal=document.createElement('div');
   modal.id='protokoll-modal';
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:20000;overflow-y:auto;padding:16px;';
-  const emailBody='Auftragsnummer: '+a.nr+'\nDatum: '+a.datum+'\nKunde: '+k.vorname+' '+k.nachname+'\nLeistung: '+a.art+'\nArbeitszeit: '+a.arbeitStd+' Std.\nFahrtzeit: '+a.fahrtStd+' Std.\nGesamtzeit: '+a.gesamtStd+' Std.\nUnterschrift: '+(a.signiert?'JA':'NEIN')+'\n\n--\n'+(s.firma||'Kanal- und Rohrreinigung Fuchs');
-  const subject='Arbeitsbestätigung '+a.nr+' - '+a.art+' - '+k.vorname+' '+k.nachname+' - '+a.datum;
+  const emailBody='Auftragsnummer: '+a.nr+'\nDatum: '+a.datum+'\nKunde: '+kundeAnzeigeName(k)+'\nLeistung: '+a.art+'\nArbeitszeit: '+a.arbeitStd+' Std.\nFahrtzeit: '+a.fahrtStd+' Std.\nGesamtzeit: '+a.gesamtStd+' Std.\nUnterschrift: '+(a.signiert?'JA':'NEIN')+'\n\n--\n'+(s.firma||'Kanal- und Rohrreinigung Fuchs');
+  const subject='Arbeitsbestätigung '+a.nr+' - '+a.art+' - '+kundeAnzeigeName(k)+' - '+a.datum;
+  window._mailDaten={an:s.email||'info@kanal-fuchs.de',betreff:subject,text:emailBody}; // v7.9.4
   modal.innerHTML=`
     <div style="background:var(--surface);border-radius:20px;max-width:700px;margin:0 auto;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
       <!-- Sticky Header mit X immer sichtbar -->
@@ -3011,7 +3455,7 @@ function auftragWiederOeffnen(id){
         </div>
         <!-- Zeile 2: Aktions-Buttons -->
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button onclick="window.open('mailto:${s.email||'info@kanal-fuchs.de'}?subject='+encodeURIComponent('${subject}')+'&body='+encodeURIComponent('${emailBody}'),'_blank')" style="background:rgba(255,255,255,0.2);border:none;color:#fff;padding:7px 12px;border-radius:20px;font-size:12px;cursor:pointer;font-weight:600;">✉️ E-Mail</button>
+          <button onclick="mailOeffnen()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;padding:7px 12px;border-radius:20px;font-size:12px;cursor:pointer;font-weight:600;">✉️ E-Mail</button>
           <button onclick="auftragAlsPdfSpeichern(${a.id})" style="background:rgba(255,255,255,0.2);border:none;color:#fff;padding:7px 12px;border-radius:20px;font-size:12px;cursor:pointer;font-weight:600;">⬇ PDF</button>
           <button onclick="auftragBearbeiten(${a.id})" style="background:rgba(255,255,255,0.2);border:none;color:#fff;padding:7px 12px;border-radius:20px;font-size:12px;cursor:pointer;font-weight:600;">✏️ Bearbeiten</button>
           <button onclick="if(confirm('Auftrag löschen?')){auftragLoeschen(${a.id});document.getElementById('protokoll-modal').remove();}" style="background:rgba(220,50,50,0.4);border:none;color:#fff;padding:7px 12px;border-radius:20px;font-size:12px;cursor:pointer;font-weight:600;">🗑</button>
@@ -3328,7 +3772,7 @@ function auftragAlsPdfSpeichern(id){
   if(!a) return;
   // Fotos aus localStorage laden
   if(!a.fotos||!a.fotos.length){
-    try{ const f=localStorage.getItem('fuchs_fotos_'+a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
+    try{ const f=_fotoLesenJSON(a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
   }
   // sigData aus localStorage laden
   if(!a.sigData){
@@ -3343,7 +3787,7 @@ function auftragAlsPdfGenerieren(id){
   // Fotos aus localStorage laden falls im State nicht vorhanden
   if(!a.fotos||!a.fotos.length){
     try{
-      const fotos = localStorage.getItem('fuchs_fotos_'+a.id);
+      const fotos = _fotoLesenJSON(a.id);
       if(fotos) a.fotos = JSON.parse(fotos);
     }catch(e){}
   }
@@ -3442,7 +3886,10 @@ function ladeEinstellungen(){
   if(document.getElementById('s-iban'))document.getElementById('s-iban').value=s.iban||'';
   if(document.getElementById('s-bank'))document.getElementById('s-bank').value=s.bank||'';
   if(document.getElementById('s-steuernr'))document.getElementById('s-steuernr').value=s.steuernr||'';
+  if(document.getElementById('s-adr-strasse'))document.getElementById('s-adr-strasse').value=s.adrStrasse||'';
+  if(document.getElementById('s-adr-ort'))document.getElementById('s-adr-ort').value=s.adrOrt||'';
   renderZugaenge();
+  try{ renderGeraete(); }catch(e){}
   // Admin-Felder vorausfüllen
   const admin=state.zugaenge&&state.zugaenge.find(z=>z.rolle==='chef');
   if(admin){
@@ -3451,14 +3898,22 @@ function ladeEinstellungen(){
   }
 }
 function einstellungenSpeichern(){
-  state.settings={
-    firma:document.getElementById('s-firma').value.trim(),
-    email:document.getElementById('s-email').value.trim(),
-    tel:document.getElementById('s-tel').value.trim(),
-    stundensatz:parseFloat(document.getElementById('s-stundensatz').value)||0,
-    fahrsatz:parseFloat(document.getElementById('s-fahrsatz').value)||0,
-    anfahrt:parseFloat(document.getElementById('s-anfahrt').value)||0
-  };
+  // v7.9.4: vorhandene Einstellungen (Logo usw.) behalten und ALLE Felder speichern
+  const v=id=>{const el=document.getElementById(id);return el?el.value.trim():'';};
+  state.settings=Object.assign({}, state.settings, {
+    firma:v('s-firma'),
+    email:v('s-email'),
+    tel:v('s-tel'),
+    adrStrasse:v('s-adr-strasse'),
+    adrOrt:v('s-adr-ort'),
+    iban:v('s-iban'),
+    bank:v('s-bank'),
+    steuernr:v('s-steuernr'),
+    stundensatz:parseFloat(v('s-stundensatz'))||0,
+    fahrsatz:parseFloat(v('s-fahrsatz'))||0,
+    anfahrt:parseFloat(v('s-anfahrt'))||0,
+    _u:Date.now()
+  });
   save();alert('✓ Einstellungen gespeichert!');
 }
 
@@ -3480,7 +3935,7 @@ function updateDashboard(){
   const termineAm=d=>(state.termine||[]).filter(t=>{try{return new Date(t.datum).toDateString()===tagStr(d);}catch(e){return false;}})
     .sort((x,y)=>(x.zeit||'').localeCompare(y.zeit||''));
   const ht=termineAm(heute), mt=termineAm(morgen);
-  const offen=state.auftraege.filter(a=>!a.inWarteschlange&&a.status!=='abgeschlossen'&&a.status!=='archiv'&&a.status!=='geplant');
+  const offen=state.auftraege.filter(a=>!a.inWarteschlange&&a.status!=='abgeschlossen'&&a.status!=='abgerechnet'&&a.status!=='archiv'&&a.status!=='geplant'); // v7.9.4
   const setT=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
   setT('m-termine',ht.length); setT('m-morgen',mt.length); setT('m-offen',offen.length);
   setT('dash-datum',heute.toLocaleDateString('de-DE',{weekday:'long',day:'numeric',month:'long'}));
@@ -3632,6 +4087,7 @@ function loginPin(taste){
         aktiverBenutzer = loginZielBenutzer;
         // Immer eingeloggt bleiben - nur manuell abmelden möglich
         localStorage.setItem('fuchs_login', JSON.stringify({id:aktiverBenutzer.id, pin:aktiverBenutzer.pin}));
+        try{ if(_geraetMelden()) save(); }catch(e){} // v7.9.4
         document.getElementById('login-screen').style.display='none';
         if(aktiverBenutzer.rolle!=='chef'){
           maAppStarten();
@@ -3670,6 +4126,7 @@ function adminAbmelden(){
 
 function maAbmelden(){
   aktiverBenutzer=null;
+  maAktivAuftragId=null; // v7.9.4
   localStorage.removeItem('fuchs_login');
   // Auto-Sync stoppen
   if(window._maAutoSync){clearInterval(window._maAutoSync);window._maAutoSync=null;}
@@ -3691,21 +4148,39 @@ function maAppStarten(){
   const app = document.getElementById('ma-app');
   app.style.display='block';
   document.getElementById('ma-name-topbar').textContent = aktiverBenutzer.name;
+  try{ const st=document.getElementById('ma-sync-status'); if(st) st.textContent='Meine Aufträge · '+APP_VERSION; }catch(e){} // v7.9.4
   const btn = document.getElementById('ma-theme-btn');
   if(btn) btn.textContent = document.documentElement.getAttribute('data-theme')==='dark'?'☀️':'🌙';
   maAuftraegeRendern();
   // Automatisch alle 30 Sekunden aktualisieren
   if(window._maAutoSync) clearInterval(window._maAutoSync);
   window._maAutoSync = setInterval(()=>{
-    syncFromSupabase().then(()=>{
-      // Nur neu rendern wenn kein Auftrag gerade aktiv bearbeitet wird
-      if(!maAktivAuftragId) maAuftraegeRendern();
+    syncPruefen().then(()=>{ // v7.9.3: leichte Pruefung, einziger Takt auf dem MA-Handy
+      maListeAktualisierenWennRuhig(); // v7.9.4: auch waehrend eines laufenden Auftrags
       const status = document.getElementById('ma-sync-status');
-      if(status) status.textContent='Auto-Sync '+new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr';
+      if(status) status.textContent='Auto-Sync '+new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr · '+APP_VERSION; // v7.9.4
     });
   }, 30000);
 }
 
+// v7.9.4: Liste auch waehrend eines laufenden Auftrags aktualisieren - aber nur, wenn sich
+// etwas geaendert hat und Rachid gerade nichts eintippt bzw. nicht unterschreibt.
+// (Doku, Zeiten, Unterzeichner, Fotos, Material liegen alle im Datenbestand, gehen also nicht verloren.)
+function _maListeSignatur(){
+  if(!aktiverBenutzer) return '';
+  // nur was der Chef aendert (nicht Rachids eigene Eingaben), sonst wuerde nach jedem eigenen Speichern neu aufgebaut
+  return _hashStr((state.auftraege||[]).filter(a=>a.zugewiesenAn==aktiverBenutzer.id).map(a=>JSON.stringify([a.id,a.status,a.reihenfolge,a.geplantUhrzeit,a.datum,a.art,a.beschreibung,a.maHinweis,a.kunde,a.einsatzort,a.prioritaet])).sort().join('|'));
+}
+function maListeAktualisierenWennRuhig(){
+  try{
+    if(!aktiverBenutzer || aktiverBenutzer.rolle==='chef') return;
+    const app=document.getElementById('ma-app'); if(!app || app.style.display==='none') return;
+    if(document.getElementById('ma-sig-modal')) return;
+    const ae=document.activeElement;
+    if(ae && app.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+    if(!maAktivAuftragId || _maListeSignatur()!==window._maListeSig) maAuftraegeRendern();
+  }catch(e){}
+}
 function maAuftraegeRendern(){
   const container = document.getElementById('ma-auftraege-container');
   // Aufträge sortiert nach Reihenfolge, Warteschlange ans Ende
@@ -3714,10 +4189,17 @@ function maAuftraegeRendern(){
     .sort((a,b)=>{
       if(a.warteschlange&&!b.warteschlange) return 1;
       if(!a.warteschlange&&b.warteschlange) return -1;
+      // v7.9.4: geplante Auftraege (Zukunft) nie als "aktueller Auftrag" oben, untereinander nach Datum
+      const ga=a.status==='geplant', gb=b.status==='geplant';
+      if(ga!==gb) return ga?1:-1;
+      if(ga&&gb) return (a.datumRaw||'').localeCompare(b.datumRaw||'')||(a.geplantUhrzeit||'').localeCompare(b.geplantUhrzeit||'');
+      if(a.status==='in_bearbeitung'&&b.status!=='in_bearbeitung') return -1;
+      if(b.status==='in_bearbeitung'&&a.status!=='in_bearbeitung') return 1;
       return (a.reihenfolge||99)-(b.reihenfolge||99)||(a.geplantUhrzeit||'').localeCompare(b.geplantUhrzeit||'');
     });
 
   if(!meineAuftraege.length){
+    maAktivAuftragId = null; window._maListeSig = _maListeSignatur(); // v7.9.4
     container.innerHTML=`<div style="text-align:center;padding:60px 20px;">
       <div style="font-size:48px;margin-bottom:16px;">✅</div>
       <div style="font-size:18px;font-weight:700;color:var(--text);">Keine offenen Aufträge</div>
@@ -3768,8 +4250,8 @@ function maAuftraegeRendern(){
         ${a.geplantUhrzeit?`<div style="font-size:20px;font-weight:900;color:var(--accent);margin-bottom:4px;">⏰ ${a.geplantUhrzeit} Uhr</div>`:''}
         <div style="font-size:18px;font-weight:800;color:var(--text);">${a.art}</div>
         <div style="font-size:13px;color:var(--text2);margin-top:2px;">${a.nr} · ${a.datum}</div>
-        ${a.beschreibung?`<div style="font-size:13px;color:var(--text);margin-top:6px;padding:8px;background:var(--surface2);border-radius:8px;">${a.beschreibung}</div>`:''}
-        ${a.maHinweis?`<div style="font-size:13px;color:var(--amber);margin-top:6px;padding:8px;background:var(--amber-bg);border-radius:8px;">⚠️ ${a.maHinweis}</div>`:''}
+        ${a.beschreibung?`<div style="font-size:13px;color:var(--text);margin-top:6px;padding:8px;background:var(--surface2);border-radius:8px;">${fxEsc(a.beschreibung)}</div>`:''}
+        ${a.maHinweis?`<div style="font-size:13px;color:var(--amber);margin-top:6px;padding:8px;background:var(--amber-bg);border-radius:8px;">⚠️ ${fxEsc(a.maHinweis)}</div>`:''}
       </div>
 
       ${eo?`<!-- v7.7: Einsatzort -->
@@ -3784,12 +4266,12 @@ function maAuftraegeRendern(){
       <div style="background:var(--surface2);border-radius:var(--radius-lg);padding:14px;margin-bottom:14px;">
         <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">👤 Kunde${eo?' · Rechnungsadresse':''}</div>
         <div style="font-size:17px;font-weight:800;color:var(--text);margin-bottom:4px;">${lgEsc(kundeAnzeigeName(k))}</div>
-        ${k.strasse?`<div style="font-size:14px;color:var(--text);font-weight:600;">${k.strasse}</div>`:''}
-        ${k.plz||k.ort?`<div style="font-size:14px;color:var(--text);">${k.plz||''} ${k.ort||''}</div>`:''}
-        ${k.objekt?`<div style="font-size:12px;color:var(--text2);margin-top:4px;">📍 ${k.objekt}</div>`:''}
-        ${k.tel?`<div style="margin-top:10px;"><a href="tel:${k.tel}" style="display:flex;align-items:center;gap:8px;padding:11px 14px;background:var(--green);color:#fff;border-radius:var(--radius);font-weight:700;font-size:14px;text-decoration:none;">📞 ${k.tel} – Anrufen</a></div>`:''}
-        ${k.email?`<div style="font-size:12px;color:var(--text2);margin-top:6px;">✉️ ${k.email}</div>`:''}
-        ${k.notizen?`<div style="font-size:12px;color:var(--text2);margin-top:6px;padding:6px 8px;background:var(--surface);border-radius:6px;">📌 ${k.notizen}</div>`:''}
+        ${k.strasse?`<div style="font-size:14px;color:var(--text);font-weight:600;">${fxEsc(k.strasse)}</div>`:''}
+        ${k.plz||k.ort?`<div style="font-size:14px;color:var(--text);">${fxEsc(k.plz||'')} ${fxEsc(k.ort||'')}</div>`:''}
+        ${k.objekt?`<div style="font-size:12px;color:var(--text2);margin-top:4px;">📍 ${fxEsc(k.objekt)}</div>`:''}
+        ${k.tel?`<div style="margin-top:10px;"><a href="tel:${fxEsc(String(k.tel).replace(/[^0-9+]/g,''))}" style="display:flex;align-items:center;gap:8px;padding:11px 14px;background:var(--green);color:#fff;border-radius:var(--radius);font-weight:700;font-size:14px;text-decoration:none;">📞 ${fxEsc(k.tel)} – Anrufen</a></div>`:''}
+        ${k.email?`<div style="font-size:12px;color:var(--text2);margin-top:6px;">✉️ ${fxEsc(k.email)}</div>`:''}
+        ${k.notizen?`<div style="font-size:12px;color:var(--text2);margin-top:6px;padding:6px 8px;background:var(--surface);border-radius:6px;">📌 ${fxEsc(k.notizen)}</div>`:''}
       </div>
 
       <!-- Aktions-Buttons (nur wenn nicht Warteschlange oder gestartet) -->
@@ -3851,19 +4333,19 @@ function maAuftraegeRendern(){
               <input id="ma-mat-menge-${a.id}" placeholder="Menge" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);font-size:14px;">
               <button onclick="maMatHinzu(${a.id})" style="padding:8px 12px;background:var(--accent);color:var(--on-accent);border:none;border-radius:var(--radius);cursor:pointer;font-weight:700;">+</button>
             </div>
-            <div id="ma-mat-liste-${a.id}">${a.materialien&&a.materialien.length?a.materialien.map((m,i)=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:13px;"><span>${m.name}</span><span>${m.menge} <button onclick="maMatLoeschen(${a.id},${i})" style="background:none;border:none;color:var(--red2);cursor:pointer;font-size:12px;">✕</button></span></div>`).join(''):''}</div>
+            <div id="ma-mat-liste-${a.id}">${a.materialien&&a.materialien.length?a.materialien.map((m,i)=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:13px;"><span>${fxEsc(m.name)}</span><span>${fxEsc(m.menge)} <button onclick="maMatLoeschen(${a.id},${i})" style="background:none;border:none;color:var(--red2);cursor:pointer;font-size:12px;">✕</button></span></div>`).join(''):''}</div>
           </div>
 
           <!-- DOKUMENTATION -->
           <div class="form-group" style="margin-bottom:10px;">
             <label>Dokumentation</label>
-            <textarea id="ma-doku-${a.id}" style="min-height:70px;" placeholder="Ausgeführte Arbeiten...">${a.doku||''}</textarea>
+            <textarea id="ma-doku-${a.id}" style="min-height:70px;" placeholder="Ausgeführte Arbeiten..." oninput="maDokuEntwurf(${a.id},this.value)">${fxEsc(a.doku||'')}</textarea>
           </div>
 
           <!-- UNTERSCHRIFT + ABSCHLIESSEN -->
           <div style="margin-bottom:8px;">
             <label style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;">Name des Unterzeichners</label>
-            <input id="ma-signer-${a.id}" type="text" value="${(a.signerName||a.kunde.vorname+' '+a.kunde.nachname).replace(/"/g,'&quot;')}" placeholder="Name des Unterzeichners" onchange="maSignerSpeichern(${a.id},this.value)" style="width:100%;margin-top:4px;padding:10px 12px;border-radius:var(--radius);border:1.5px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;">
+            <input id="ma-signer-${a.id}" type="text" value="${fxEsc(a.signerName||fxKundeName(a.kunde)||a.kunde.firma||'')}" placeholder="Name des Unterzeichners" onchange="maSignerSpeichern(${a.id},this.value)" style="width:100%;margin-top:4px;padding:10px 12px;border-radius:var(--radius);border:1.5px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;">
           </div>
           <button onclick="maUnterschriftStarten(${a.id})" style="padding:13px;background:var(--surface2);color:var(--text);border:1.5px solid var(--border);border-radius:var(--radius);font-weight:700;font-size:14px;cursor:pointer;width:100%;margin-bottom:8px;">✍️ Kundenunterschrift</button>
           <div id="ma-sig-status-${a.id}" style="display:${a.sigData?'block':'none'};color:var(--green2);font-size:13px;text-align:center;margin-bottom:8px;font-weight:700;">✓ Unterschrift vorhanden</div>
@@ -3883,6 +4365,8 @@ function maAuftraegeRendern(){
   // Timer für aktiven Auftrag neu starten
   const aktiverAuftrag = meineAuftraege.find(a=>a.maGestartet&&a.status==='in_bearbeitung'&&a.maTimerStart);
   if(maTimerInterval){ clearInterval(maTimerInterval); maTimerInterval=null; }
+  if(!aktiverAuftrag) maAktivAuftragId = null; // v7.9.4
+  window._maListeSig = _maListeSignatur(); // v7.9.4
   if(aktiverAuftrag){
     maAktivAuftragId = aktiverAuftrag.id;
     maTimerInterval = setInterval(()=>maTimerTick(aktiverAuftrag.id), 1000);
@@ -3895,7 +4379,7 @@ function maIchBinDa(id){
   a.maGestartet=true;
   a.maStartZeit=new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
   a.maTimerStart=Date.now();
-  a.status='in_bearbeitung';
+  statusSetzen(a,'in_bearbeitung');
   maAktivAuftragId=id;
   save();
   maAuftraegeRendern();
@@ -3954,6 +4438,7 @@ window.addEventListener('pagehide', function(){ baustelleSichern(); });
 function maFotoLoeschen(auftragId, idx){
   const a=state.auftraege.find(x=>x.id===auftragId);if(!a||!a.fotos)return;
   a.fotos.splice(idx,1);
+  if(!a.fotos.length) _fotoSchreiben(a.id, []); // v7.9.4: letztes Foto wirklich entfernen
   save();
   maFotoGridAktualisieren(auftragId);
 }
@@ -3989,7 +4474,7 @@ function maPdfHtmlGenerieren(a){
   // Fotos + sigData aus localStorage laden falls im State nicht vorhanden
   if(!a.fotos||!a.fotos.length){
     try{
-      const fotos = localStorage.getItem('fuchs_fotos_'+a.id);
+      const fotos = _fotoLesenJSON(a.id);
       if(fotos) a.fotos = JSON.parse(fotos);
     }catch(e){}
   }
@@ -4075,12 +4560,13 @@ async function maAuftragAbschliessen(id){
   a.fahrtStd=fahrt.toFixed(2);
   a.gesamtStd=(arbeit+fahrt).toFixed(2);
   a.doku=doku;
-  a.status='abgeschlossen';
+  statusSetzen(a,'abgeschlossen');
   a.abgeschlossenVon=aktiverBenutzer.name;
   a.abgeschlossenUm=new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
   a.zugewiesenAn=null; // Zuweisung entfernen nach Abschluss
   // Timer stoppen
   if(maTimerInterval){clearInterval(maTimerInterval);maTimerInterval=null;}
+  if(maAktivAuftragId===id) maAktivAuftragId=null; // v7.9.4: sonst aktualisierte sich die Liste danach nie mehr
   // Nächsten Auftrag aus Warteschlange aktivieren
   const naechster=state.auftraege.find(au=>au.zugewiesenAn==aktiverBenutzer.id&&au.warteschlange&&au.status!=='abgeschlossen');
   if(naechster){naechster.warteschlange=false;}
@@ -4090,10 +4576,9 @@ async function maAuftragAbschliessen(id){
   }
   // Fotos aus localStorage laden falls nicht im State
   if(!a.fotos||!a.fotos.length){
-    try{ const f=localStorage.getItem('fuchs_fotos_'+a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
+    try{ const f=_fotoLesenJSON(a.id); if(f) a.fotos=JSON.parse(f); }catch(e){}
   }
-  // PDF auf Mitarbeiter-Handy generieren mit Unterschrift
-  a.pdfHtml = maPdfHtmlGenerieren(a);
+  // v7.9.3: kein Protokoll-HTML mehr im Auftrag speichern (wurde nie gelesen, machte die Daten riesig)
   save();
   updateWarteschlange();
   // Push-Benachrichtigung an Chef
@@ -4101,12 +4586,16 @@ async function maAuftragAbschliessen(id){
   maAuftraegeRendern();
   // Cloud-Speicherung ABWARTEN bevor Dialoge kommen - sonst kann das
   // Teilen-Menü (App-Wechsel zu WhatsApp etc.) den Upload abwürgen.
+  const maStatus = document.getElementById('ma-sync-status');
+  if(maStatus) maStatus.textContent = '⟳ Wird gesendet...';
   updateSyncStatus('⟳ Speichere...');
-  await saveJetzt();
-  if(naechster){
-    alert(`✓ Auftrag abgeschlossen!\n\nNächster Auftrag aktiviert: ${naechster.nr} – ${naechster.art}`);
+  const gesendet = await saveJetzt(); // v7.9.3: Meldung erst, wenn wirklich gesendet
+  if(maStatus) maStatus.textContent = gesendet ? ('✓ Gesendet '+new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr') : '⚠️ Noch nicht gesendet';
+  const naechsterText = naechster ? `\n\nNächster Auftrag: ${naechster.nr} – ${naechster.art}` : '';
+  if(gesendet){
+    alert('✓ Auftrag abgeschlossen' + naechsterText);
   } else {
-    alert('✓ Auftrag abgeschlossen! Chef wird benachrichtigt.');
+    alert('⚠️ Auftrag abgeschlossen, aber noch nicht gesendet.\n\nBitte Internet prüfen – die App sendet automatisch, sobald wieder Verbindung da ist.' + naechsterText);
   }
   // Direkt anbieten, das Protokoll zu teilen (WhatsApp/Dropbox/Mail) -
   // zusätzlich zur Cloud, nicht als Ersatz dafür
@@ -4205,7 +4694,8 @@ function maUnterschriftStarten(auftragId){
       // Bestehende Unterschrift laden
       if(a.sigData){
         const img = new Image();
-        img.onload = ()=> ctx.drawImage(img, 0, 0, w, h);
+        // v7.9.4: Seitenverhaeltnis beibehalten (sonst nach erneutem Speichern verzerrt)
+        img.onload = ()=>{ const f=Math.min(w/img.width, h/img.height); const dw=img.width*f, dh=img.height*f; ctx.drawImage(img, (w-dw)/2, (h-dh)/2, dw, dh); };
         img.src = a.sigData;
       }
 
@@ -4289,6 +4779,7 @@ function maUnterschriftStarten(auftragId){
         if(hasContent){
           a.sigData = canvas.toDataURL('image/jpeg', 0.85);
           a.signiert = true;
+          _sigKlein(a.sigData).then(function(k){ if(a.sigData && k.length < a.sigData.length){ a.sigData=k; try{ localStorage.setItem('fuchs_sig_'+a.id, k); }catch(e){} save(); } }); // v7.9.4
           // sigData in localStorage sichern damit Sync es nicht überschreibt
           try{ localStorage.setItem('fuchs_sig_'+a.id, a.sigData); }catch(e){}
           save();
@@ -4315,7 +4806,25 @@ function maSignerSpeichern(auftragId, name){
   const a = state.auftraege.find(x=>x.id===auftragId);
   if(!a) return;
   a.signerName = name;
+  save(); // v7.9.4: sonst nach App-Neustart weg
 }
+// v7.9.4: Doku-Text laufend sichern (iOS/Android beenden die App im Hintergrund, z.B. beim Fotografieren)
+let _maDokuTimer = null;
+function maDokuEntwurf(auftragId, text){
+  const a = state.auftraege.find(x=>x.id===auftragId);
+  if(!a) return;
+  a.doku = text;
+  if(_maDokuTimer) clearTimeout(_maDokuTimer);
+  window._maDokuEntwurf = {id:auftragId, text:text};
+  _maDokuTimer = setTimeout(_maDokuSichern, 3000);
+}
+function _maDokuSichern(){
+  _maDokuTimer = null;
+  const e = window._maDokuEntwurf; window._maDokuEntwurf = null;
+  if(e){ const a = state.auftraege.find(x=>x.id===e.id); if(a) a.doku = e.text; }
+  save();
+}
+document.addEventListener('visibilitychange', function(){ if(document.hidden && _maDokuTimer){ clearTimeout(_maDokuTimer); _maDokuSichern(); } });
 
 function maZeitSpeichern(auftragId, typ, val){
   const a = state.auftraege.find(x=>x.id===auftragId);
@@ -4357,8 +4866,8 @@ function maMatListeAktualisieren(auftragId){
   if(a.materialien && a.materialien.length){
     listeEl.innerHTML = a.materialien.map((m,i)=>
       `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:13px;">
-        <span>${m.name}</span>
-        <span>${m.menge} <button onclick="maMatLoeschen(${auftragId},${i})" style="background:none;border:none;color:var(--red2);cursor:pointer;font-size:12px;">✕</button></span>
+        <span>${fxEsc(m.name)}</span>
+        <span>${fxEsc(m.menge)} <button onclick="maMatLoeschen(${auftragId},${i})" style="background:none;border:none;color:var(--red2);cursor:pointer;font-size:12px;">✕</button></span>
       </div>`
     ).join('');
   } else {
@@ -4419,7 +4928,9 @@ function maFotoAufnehmen(auftragId, quelle){
   
   document.body.appendChild(input);
   input.click();
-  setTimeout(()=>input.remove(), 5000);
+  // v7.9.4: Feld erst nach der Auswahl entfernen (Kamera kann laenger als 5 s offen sein)
+  input.addEventListener('change', ()=>setTimeout(()=>input.remove(), 60000), {once:true});
+  setTimeout(()=>{ if(input.isConnected && !(input.files&&input.files.length)) input.remove(); }, 600000);
 }
 
 // ══════════════════════════════════════════
@@ -4431,7 +4942,7 @@ function renderWarteschlange(){
   const badge = document.getElementById('wq-nav-badge');
   if(!el) return;
 
-  const wq = state.auftraege.filter(a=>a.inWarteschlange&&a.status==='warteschlange');
+  const wq = state.auftraege.filter(a=>a.status==='warteschlange'||(a.inWarteschlange&&!a.zugewiesenAn&&statusRang(a.status)<=1)); // v7.9.4
 
   if(count) count.textContent = wq.length + ' Aufträge';
   if(badge){
@@ -4448,12 +4959,12 @@ function renderWarteschlange(){
     <div style="background:var(--surface2);border-radius:var(--radius-lg);padding:14px;margin-bottom:10px;border-left:4px solid var(--amber);">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">
         <div>
-          <div style="font-size:13px;color:var(--text2);">${a.nr} · ${a.datum}</div>
-          <div style="font-size:17px;font-weight:800;">${a.art}</div>
-          <div style="font-size:13px;color:var(--text2);margin-top:2px;">${a.kunde.vorname} ${a.kunde.nachname}</div>
-          <div style="font-size:12px;color:var(--text3);">${a.kunde.strasse||''} ${a.kunde.ort||''}</div>
+          <div style="font-size:13px;color:var(--text2);">${fxEsc(a.nr)} · ${fxEsc(a.datum)}</div>
+          <div style="font-size:17px;font-weight:800;">${fxEsc(a.art)}</div>
+          <div style="font-size:13px;color:var(--text2);margin-top:2px;">${fxEsc(kundeAnzeigeName(a.kunde))}</div>
+          <div style="font-size:12px;color:var(--text3);">${fxEsc((a.kunde&&a.kunde.strasse)||'')} ${fxEsc((a.kunde&&a.kunde.ort)||'')}</div>
           ${einsatzortZeileHtml(a)}
-          ${a.beschreibung?`<div style="font-size:12px;color:var(--text2);margin-top:4px;">${a.beschreibung}</div>`:''}
+          ${a.beschreibung?`<div style="font-size:12px;color:var(--text2);margin-top:4px;">${fxEsc(a.beschreibung)}</div>`:''}
         </div>
         <span class="badge amber">🕐 Wartend</span>
       </div>
@@ -4467,10 +4978,7 @@ function renderWarteschlange(){
 function wqAuftragZuweisen(id){
   const a = state.auftraege.find(x=>x.id===id);
   if(!a) return;
-  a.inWarteschlange = false;
-  a.status = 'offen';
-  renderWarteschlange();
-  updateWarteschlange();
+  // v7.9.4: Status wird erst gesetzt, wenn wirklich ein Mitarbeiter gewaehlt ist
   // Zuweisen-Dialog öffnen
   auftragZuweisen(id);
 }
@@ -4479,6 +4987,8 @@ function wqAuftragLoeschen(id){
   if(!confirm('Auftrag aus Warteschlange löschen?')) return;
   loeschMarkieren('auftraege',id); // v7.9
   state.auftraege = state.auftraege.filter(a=>a.id!==id);
+  (state.termine||[]).filter(t=>t.auftragId!=null&&t.auftragId==id).forEach(t=>loeschMarkieren('termine',t.id)); // v7.9.4
+  state.termine=(state.termine||[]).filter(t=>!(t.auftragId!=null&&t.auftragId==id));
   renderWarteschlange();
   renderAuftraege();
   updateWarteschlange();
@@ -4487,7 +4997,7 @@ function wqAuftragLoeschen(id){
 
 function updateWarteschlange(){
   // Warteschlange Badge im Nav aktualisieren
-  const offen=state.auftraege.filter(a=>!a.zugewiesenAn&&a.status!=='abgerechnet'&&a.status!=='abgeschlossen'&&!a.inWarteschlange);
+  const offen=state.auftraege.filter(a=>a.status==='warteschlange'||(a.inWarteschlange&&!a.zugewiesenAn&&statusRang(a.status)<=1)); // v7.9.4: nur echte Warteschlange
   const badge=document.getElementById('wq-nav-badge');
   if(badge){
     badge.style.display=offen.length>0?'block':'none';
@@ -4503,7 +5013,7 @@ function sendePushAnMitarbeiter(auftrag, mitarbeiter){
   if(!('Notification' in window)||Notification.permission!=='granted')return;
   const k=auftrag.kunde;
   const titel=`📋 Neuer Auftrag: ${auftrag.art}`;
-  const body=`${auftrag.geplantUhrzeit?'⏰ '+auftrag.geplantUhrzeit+' Uhr – ':''}${k.vorname} ${k.nachname}, ${k.strasse||''} ${k.ort||''}`;
+  const body=`${auftrag.geplantUhrzeit?'⏰ '+auftrag.geplantUhrzeit+' Uhr – ':''}${kundeAnzeigeName(k)}, ${k.strasse||''} ${k.ort||''}`;
   try{
     new Notification(titel,{
       body,
@@ -4524,7 +5034,7 @@ function sendePushBenachrichtigung(auftrag){
   if(!('Notification' in window)||Notification.permission!=='granted')return;
   const k=auftrag.kunde;
   const titel=`✅ Auftrag ${auftrag.nr} abgeschlossen`;
-  const body=`${auftrag.abgeschlossenVon||'Mitarbeiter'} hat "${auftrag.art}" bei ${k.vorname} ${k.nachname} um ${auftrag.abgeschlossenUm} Uhr abgeschlossen.`;
+  const body=`${auftrag.abgeschlossenVon||'Mitarbeiter'} hat "${auftrag.art}" bei ${kundeAnzeigeName(k)} um ${auftrag.abgeschlossenUm} Uhr abgeschlossen.`;
   try{
     new Notification(titel,{body,icon:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🦊</text></svg>'});
   }catch(e){}
@@ -4553,7 +5063,7 @@ function auftragZuweisen(id){
     <div style="background:var(--accent);color:var(--on-accent);padding:14px 16px;display:flex;justify-content:space-between;align-items:center;">
       <div>
         <div style="font-weight:700;">👤 Auftrag zuweisen</div>
-        <div style="font-size:12px;opacity:0.8;">${a.nr} – ${a.art} · ${a.kunde.vorname} ${a.kunde.nachname}</div>
+        <div style="font-size:12px;opacity:0.8;">${fxEsc(a.nr)} – ${fxEsc(a.art)} · ${fxEsc(kundeAnzeigeName(a.kunde))}</div>
       </div>
       <button onclick="document.getElementById('zuweisen-modal').remove()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:16px;">✕</button>
     </div>
@@ -4561,12 +5071,12 @@ function auftragZuweisen(id){
       <!-- Uhrzeit festlegen -->
       <div style="margin-bottom:14px;">
         <label style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;display:block;margin-bottom:6px;">⏰ Geplante Uhrzeit</label>
-        <input type="time" id="zuweisen-uhrzeit" value="${a.geplantUhrzeit||''}" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);font-size:16px;">
+        <input type="time" id="zuweisen-uhrzeit" value="${fxEsc(a.geplantUhrzeit)}" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);font-size:16px;">
       </div>
       <!-- Notiz für Mitarbeiter -->
       <div style="margin-bottom:14px;">
         <label style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;display:block;margin-bottom:6px;">📝 Hinweis für Mitarbeiter</label>
-        <textarea id="zuweisen-hinweis" placeholder="z.B. Klingel defekt, bitte anrufen..." style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);font-size:14px;min-height:55px;font-family:inherit;">${a.maHinweis||''}</textarea>
+        <textarea id="zuweisen-hinweis" placeholder="z.B. Klingel defekt, bitte anrufen..." style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text);font-size:14px;min-height:55px;font-family:inherit;">${fxEsc(a.maHinweis)}</textarea>
       </div>
 
       <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:8px;">Mitarbeiter wählen</div>
@@ -4607,9 +5117,12 @@ function auftragZuweisenMitOptionen(auftragId, maId){
   a.geplantUhrzeit=uhrzeit;
   a.maHinweis=hinweis;
   a.warteschlange=false; // Immer sofort sichtbar
+  // v7.9.4: geplant/laufend bleibt so, sonst "offen"
+  statusSetzen(a, (a.status==='geplant'||a.status==='in_bearbeitung') ? a.status : 'offen');
+  a.zugewiesenAn=maId;
   a.reihenfolge=reihenfolge;
-  a.status='offen';
   document.getElementById('zuweisen-modal').remove();
+  renderWarteschlange();
   renderAuftraege();updateWarteschlange();save();
   const z=state.zugaenge.find(x=>x.id==maId);
   if(z){
@@ -4628,8 +5141,7 @@ function auftragWegnehmen(id){
   a.zugewiesenAn = null;
   a.reihenfolge = null;
   a.maGestartet = false;
-  a.inWarteschlange = true;
-  a.status = 'warteschlange';
+  statusSetzen(a,'warteschlange');
   const modal = document.getElementById('zuweisen-modal');
   if(modal) modal.remove();
   renderAuftraege();
@@ -4641,6 +5153,8 @@ function auftragWegnehmen(id){
 
 function auftragZuweisenAn(auftragId,maId){
   const a=state.auftraege.find(x=>x.id===auftragId);if(!a)return;
+  if(maId) statusSetzen(a, (a.status==='geplant'||a.status==='in_bearbeitung'||a.status==='offen') ? a.status : 'offen');
+  else statusSetzen(a, a.status); // Zuweisung entfernen soll auch auf den anderen Geraeten ankommen
   a.zugewiesenAn=maId;
   if(!maId){a.reihenfolge=null;a.geplantUhrzeit='';}
   document.getElementById('zuweisen-modal').remove();
@@ -4739,7 +5253,7 @@ function renderRechnungen(){
   el.innerHTML=filtered.map(r=>`
     <div class="list-item">
       <div style="flex:1;min-width:0;">
-        <div style="font-weight:600;">${r.nr} – ${r.kunde}</div>
+        <div style="font-weight:600;">${fxEsc(r.nr)} – ${fxEsc(r.kunde)}</div>
         <div style="font-size:12px;color:var(--text2);">${r.datum} · Fällig: ${r.faellig}</div>
         <div style="font-size:14px;font-weight:700;color:var(--accent);margin-top:2px;">${r.brutto.toFixed(2)} €</div>
       </div>
@@ -4764,8 +5278,14 @@ function rechnungErstellen(){
   const extraPreis=parseFloat(document.getElementById('r-extra-preis').value)||0;
   const arbeit=parseFloat(a.arbeitStd)||0;
   const fahrt=parseFloat(a.fahrtStd)||0;
-  const netto=arbeit*stundensatz+fahrt*(parseFloat(s.fahrsatz)||stundensatz)+anfahrt+extraPreis;
-  const brutto=netto*1.19;
+  const fahrsatz=parseFloat(s.fahrsatz)||stundensatz; // v7.9.4: wird in der Rechnung gespeichert
+  // v7.9.4: aktuelle Kundendaten (falls der Kunde nach dem Auftrag korrigiert wurde)
+  const kAktuell=(a.kunde&&state.kunden.find(x=>x.id==a.kunde.id))||a.kunde;
+  // v7.9.4: jede Position auf Cent runden, MwSt. einmal gerundet -> Summe stimmt immer
+  const _c=v=>Math.round(v*100)/100;
+  const netto=_c(_c(arbeit*stundensatz)+_c(fahrt*fahrsatz)+_c(anfahrt)+_c(extraPreis));
+  const mwst=_c(netto*0.19);
+  const brutto=_c(netto+mwst);
   if(!state.rechnungen)state.rechnungen=[];
   if(!state.rechnungNr)state.rechnungNr=1001;
   const datum=new Date().toLocaleDateString('de-DE');
@@ -4776,12 +5296,14 @@ function rechnungErstellen(){
     nr:'R-'+state.rechnungNr++,
     auftragId:a.id,
     auftragNr:a.nr,
-    kunde:a.kunde.vorname+' '+a.kunde.nachname,
-    kundeObj:a.kunde,
+    kunde:kundeAnzeigeName(kAktuell), // v7.9.4: mit Firmenname
+    kundeObj:JSON.parse(JSON.stringify(kAktuell||{})),
+    leistungsdatum:a.datum||'', // v7.9.4: Pflichtangabe
+    einsatzort:a.einsatzort||null,
     datum,
     faellig:faelligDatum.toLocaleDateString('de-DE'),
     arbeitStd:arbeit,fahrtStd:fahrt,
-    stundensatz,anfahrt,extraText,extraPreis,
+    stundensatz,fahrsatz,anfahrt,extraText,extraPreis,
     netto,brutto,
     status:'offen',
     art:a.art,
@@ -4789,21 +5311,36 @@ function rechnungErstellen(){
   };
   state.rechnungen.push(rechnung);
   // Auftrag als abgerechnet markieren
-  a.status='abgerechnet';a.statusLabel='Abgerechnet';
+  statusSetzen(a,'abgerechnet');
   renderRechnungen();renderAuftraege();updateDashboard();save();
   alert('✓ Rechnung '+rechnung.nr+' erstellt!');
 }
 
 function rechnungStatusAendern(id){
+  // v7.9.4: Auswahl statt Durchklicken (ein Fehltipp machte aus "bezahlt" "gemahnt")
   const r=state.rechnungen.find(x=>x.id===id);if(!r)return;
-  const stati=['offen','bezahlt','gemahnt'];
-  const idx=stati.indexOf(r.status);
-  r.status=stati[(idx+1)%stati.length];
+  const old=document.getElementById('status-popup'); if(old)old.remove();
+  const popup=document.createElement('div');
+  popup.id='status-popup';
+  popup.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:20000;display:flex;align-items:center;justify-content:center;padding:16px;';
+  const opt=(k,l)=>`<button onclick="rechnungStatusSetzen(${id},'${k}')" style="width:100%;padding:12px;margin-bottom:8px;border:1.5px solid var(--border);border-radius:var(--radius);background:${r.status===k?'var(--accent)':'var(--surface2)'};color:${r.status===k?'var(--on-accent)':'var(--text)'};font-size:14px;font-weight:600;cursor:pointer;text-align:left;">${l}</button>`;
+  popup.innerHTML=`<div style="background:var(--surface);border-radius:16px;padding:20px;width:100%;max-width:320px;"><div style="font-weight:700;font-size:15px;margin-bottom:14px;color:var(--text);">Rechnung ${fxEsc(r.nr)}</div>${opt('offen','Offen')}${opt('bezahlt','Bezahlt')}${opt('gemahnt','Gemahnt')}<button onclick="document.getElementById('status-popup').remove()" class="btn" style="width:100%;margin-top:4px;justify-content:center;">Abbrechen</button></div>`;
+  document.body.appendChild(popup);
+  popup.addEventListener('click',e=>{if(e.target===popup)popup.remove();});
+}
+function rechnungStatusSetzen(id,status){
+  const r=state.rechnungen.find(x=>x.id===id);if(!r)return;
+  r.status=status;
+  const p=document.getElementById('status-popup');if(p)p.remove();
   renderRechnungen();save();
 }
 
 function rechnungLoeschen(id){
   if(!confirm('Rechnung löschen?'))return;
+  // v7.9.4: Auftrag wieder auf "Erledigt", damit er neu abgerechnet werden kann
+  const rr=(state.rechnungen||[]).find(x=>x.id===id);
+  const au=rr?state.auftraege.find(a=>a.id==rr.auftragId):null;
+  if(au && au.status==='abgerechnet') statusSetzen(au,'abgeschlossen');
   loeschMarkieren('rechnungen',id); // v7.9
   state.rechnungen=state.rechnungen.filter(r=>r.id!==id);
   renderRechnungen();save();
@@ -4814,7 +5351,13 @@ function rechnungPdfSpeichern(id){
   const s=state.settings;
   const k=r.kundeObj||{};
   const logoHtml=s.logoData?`<img src="${s.logoData}" style="height:52px;width:auto;object-fit:contain;border-radius:6px;">`:'🦊';
-  const fahrsatz=parseFloat(s.fahrsatz)||parseFloat(r.stundensatz)||130;
+  // v7.9.4: Fahrtsatz der Rechnung verwenden, nicht den heutigen aus den Einstellungen.
+  // Aeltere Rechnungen ohne gespeicherten Satz: aus dem damaligen Netto zurueckrechnen.
+  let fahrsatz=parseFloat(r.fahrsatz);
+  if(!(fahrsatz>=0)){
+    const rest=(r.netto||0)-(r.arbeitStd||0)*(r.stundensatz||0)-(r.anfahrt||0)-(r.extraText&&r.extraPreis?r.extraPreis:(r.extraPreis||0));
+    fahrsatz=(r.fahrtStd>0)?Math.round(rest/r.fahrtStd*100)/100:(parseFloat(s.fahrsatz)||parseFloat(r.stundensatz)||130);
+  }
 
   const pdfHtml=`<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8"><title>Rechnung ${r.nr}</title><style>
     *{box-sizing:border-box;margin:0;padding:0;}
@@ -4836,43 +5379,41 @@ function rechnungPdfSpeichern(id){
     .badge-paid{background:#d6f5e3;color:#0f7a38;}
   </style></head><body>
   <div class="header">
-    <div class="logo-wrap">${logoHtml}<div><div class="firm-name">${s.firma||'Kanal- und Rohrreinigung Fuchs'}</div><div style="font-size:11px;color:var(--text2);">Tel: ${s.tel||'06003/8276464'} · ${s.email||'info@kanal-fuchs.de'}</div>${s.iban?`<div style="font-size:11px;color:var(--text2);">IBAN: ${s.iban}</div>`:''}</div></div>
-    <div class="nr-box"><div style="font-size:10px;color:#999;text-transform:uppercase;">Rechnung</div><div style="font-size:22px;font-weight:800;color:var(--accent);">${r.nr}</div><div style="font-size:12px;color:var(--text2);">Datum: ${r.datum}</div><div style="font-size:12px;color:var(--text2);">Fällig: ${r.faellig}</div></div>
+    <div class="logo-wrap">${logoHtml}<div><div class="firm-name">${fxEsc(s.firma||'Kanal- und Rohrreinigung Fuchs')}</div>${s.adrStrasse||s.adrOrt?`<div style="font-size:11px;color:var(--text2);">${fxEsc(s.adrStrasse||'')}${s.adrStrasse&&s.adrOrt?', ':''}${fxEsc(s.adrOrt||'')}</div>`:''}<div style="font-size:11px;color:var(--text2);">Tel: ${fxEsc(s.tel||'06003/8276464')} · ${fxEsc(s.email||'info@kanal-fuchs.de')}</div>${s.iban?`<div style="font-size:11px;color:var(--text2);">IBAN: ${fxEsc(s.iban)}</div>`:''}</div></div>
+    <div class="nr-box"><div style="font-size:10px;color:#999;text-transform:uppercase;">Rechnung</div><div style="font-size:22px;font-weight:800;color:var(--accent);">${fxEsc(r.nr)}</div><div style="font-size:12px;color:var(--text2);">Datum: ${r.datum}</div>${r.leistungsdatum?`<div style="font-size:12px;color:var(--text2);">Leistungsdatum: ${fxEsc(r.leistungsdatum)}</div>`:''}<div style="font-size:12px;color:var(--text2);">Fällig: ${r.faellig}</div></div>
   </div>
 
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px;">
-    <div class="box"><div class="box-label">Rechnungsempfänger</div><div style="font-weight:600;">${k.vorname||''} ${k.nachname||''}</div><div style="font-size:11px;color:var(--text2);">${k.strasse||''}</div><div style="font-size:11px;color:var(--text2);">${k.plz||''} ${k.ort||''}</div></div>
-    <div class="box"><div class="box-label">Leistung</div><div style="font-weight:600;">${r.art}</div><div style="font-size:11px;color:var(--text2);">Auftrag: ${r.auftragNr}</div>${r.beschreibung?`<div style="font-size:11px;color:#444;margin-top:4px;">${r.beschreibung}</div>`:''}</div>
+    <div class="box"><div class="box-label">Rechnungsempfänger</div><div style="font-weight:600;">${fxEsc(k.firma||fxKundeName(k))}</div>${k.firma&&fxKundeName(k)?`<div style="font-size:11px;color:var(--text2);">z. Hd. ${fxEsc(fxKundeName(k))}</div>`:''}<div style="font-size:11px;color:var(--text2);">${fxEsc(k.strasse||'')}</div><div style="font-size:11px;color:var(--text2);">${fxEsc(k.plz||'')} ${fxEsc(k.ort||'')}</div></div>
+    <div class="box"><div class="box-label">Leistung</div><div style="font-weight:600;">${fxEsc(r.art)}</div><div style="font-size:11px;color:var(--text2);">Auftrag: ${fxEsc(r.auftragNr)}</div>${r.einsatzort&&(r.einsatzort.strasse||r.einsatzort.ort)?`<div style="font-size:11px;color:var(--text2);">Einsatzort: ${fxEsc([r.einsatzort.bezeichnung,r.einsatzort.strasse,((r.einsatzort.plz||'')+' '+(r.einsatzort.ort||'')).trim()].filter(Boolean).join(', '))}</div>`:''}${r.beschreibung?`<div style="font-size:11px;color:#444;margin-top:4px;">${fxEsc(r.beschreibung)}</div>`:''}</div>
   </div>
 
   <table style="margin-bottom:20px;border-radius:8px;overflow:hidden;">
     <tr><th>Position</th><th style="text-align:right;">Menge</th><th style="text-align:right;">Einzel (€)</th><th style="text-align:right;">Gesamt (€)</th></tr>
-    <tr><td>Arbeitszeit</td><td style="text-align:right;">${r.arbeitStd.toFixed(2)} Std.</td><td style="text-align:right;">${r.stundensatz.toFixed(2)}</td><td style="text-align:right;">${(r.arbeitStd*r.stundensatz).toFixed(2)}</td></tr>
-    <tr><td>Fahrtzeit</td><td style="text-align:right;">${r.fahrtStd.toFixed(2)} Std.</td><td style="text-align:right;">${fahrsatz.toFixed(2)}</td><td style="text-align:right;">${(r.fahrtStd*fahrsatz).toFixed(2)}</td></tr>
+    <tr><td>Arbeitszeit</td><td style="text-align:right;">${r.arbeitStd.toFixed(2)} Std.</td><td style="text-align:right;">${r.stundensatz.toFixed(2)}</td><td style="text-align:right;">${(Math.round(r.arbeitStd*r.stundensatz*100)/100).toFixed(2)}</td></tr>
+    <tr><td>Fahrtzeit</td><td style="text-align:right;">${r.fahrtStd.toFixed(2)} Std.</td><td style="text-align:right;">${fahrsatz.toFixed(2)}</td><td style="text-align:right;">${(Math.round(r.fahrtStd*fahrsatz*100)/100).toFixed(2)}</td></tr>
     ${r.anfahrt?`<tr><td>Anfahrtspauschale</td><td></td><td></td><td style="text-align:right;">${r.anfahrt.toFixed(2)}</td></tr>`:''}
-    ${r.extraText&&r.extraPreis?`<tr><td>${r.extraText}</td><td></td><td></td><td style="text-align:right;">${r.extraPreis.toFixed(2)}</td></tr>`:''}
+    ${r.extraText&&r.extraPreis?`<tr><td>${fxEsc(r.extraText)}</td><td></td><td></td><td style="text-align:right;">${r.extraPreis.toFixed(2)}</td></tr>`:''}
     <tr><td colspan="3" style="font-weight:700;border-top:2px solid var(--accent);">Netto</td><td style="text-align:right;font-weight:700;border-top:2px solid var(--accent);">${r.netto.toFixed(2)} €</td></tr>
-    <tr><td colspan="3">zzgl. 19% MwSt.</td><td style="text-align:right;">${(r.netto*0.19).toFixed(2)} €</td></tr>
+    <tr><td colspan="3">zzgl. 19% MwSt.</td><td style="text-align:right;">${(r.brutto-r.netto).toFixed(2)} €</td></tr>
     <tr><td colspan="3" class="total">BRUTTO GESAMT</td><td class="total" style="text-align:right;">${r.brutto.toFixed(2)} €</td></tr>
   </table>
 
-  ${s.iban?`<div style="background:#e8f0fa;border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;"><strong>Bankverbindung:</strong> ${s.iban}${s.bank?' · '+s.bank:''}<br>Verwendungszweck: ${r.nr} / ${k.vorname||''} ${k.nachname||''}</div>`:''}
+  ${s.iban?`<div style="background:#e8f0fa;border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;"><strong>Bankverbindung:</strong> ${fxEsc(s.iban)}${s.bank?' · '+fxEsc(s.bank):''}<br>Verwendungszweck: ${fxEsc(r.nr)} / ${fxEsc(k.firma||fxKundeName(k))}</div>`:''}
 
-  <div class="footer">${s.firma||'Kanal- und Rohrreinigung Fuchs'} · ${s.tel||'06003/8276464'} · ${s.email||'info@kanal-fuchs.de'}${s.steuernr?' · StNr: '+s.steuernr:''}</div>
+  <div class="footer">${fxEsc(s.firma||'Kanal- und Rohrreinigung Fuchs')}${s.adrStrasse||s.adrOrt?' · '+fxEsc([s.adrStrasse,s.adrOrt].filter(Boolean).join(', ')):''} · ${fxEsc(s.tel||'06003/8276464')} · ${fxEsc(s.email||'info@kanal-fuchs.de')}${s.steuernr?' · StNr: '+fxEsc(s.steuernr):''}</div>
   
   </body></html>`;
 
-  const blob=new Blob([pdfHtml],{type:'text/html'});
-  const url=URL.createObjectURL(blob);
-  const win=window.open(url,'_blank');
-  if(!win)alert('Bitte Pop-ups erlauben!');
-  setTimeout(()=>URL.revokeObjectURL(url),60000);
+  // v7.9.4: in der App anzeigen (Drucken / als PDF sichern) statt Pop-up-Fenster
+  pdfViewerOeffnen(pdfHtml, 'Rechnung '+r.nr);
 }
 
 function updateRechnungenSelect(){
   const sel=document.getElementById('r-auftrag');if(!sel)return;
-  const offene=state.auftraege.filter(a=>a.status!=='abgerechnet');
-  sel.innerHTML='<option value="">Auftrag wählen...</option>'+offene.map(a=>`<option value="${a.id}">${a.nr} – ${a.kunde.vorname} ${a.kunde.nachname} (${a.art})</option>`).join('');
+  // v7.9.4: nur erledigte, noch nicht abgerechnete Auftraege; mit Firmenname
+  const offene=state.auftraege.filter(a=>a.status==='abgeschlossen');
+  sel.innerHTML='<option value="">Auftrag wählen...</option>'+offene.map(a=>`<option value="${fxEsc(a.id)}">${fxEsc(a.nr)} – ${fxEsc(kundeAnzeigeName(a.kunde))} (${fxEsc(a.art)})</option>`).join('');
 }
 
 
@@ -4922,9 +5463,12 @@ initTheme();
 function logoHochladen(input){
   if(!input.files||!input.files[0])return;
   const r=new FileReader();
-  r.onload=e=>{
-    const data=e.target.result;
+  r.onload=async e=>{
+    // v7.9.4: Logo verkleinern (max. 400 px), sonst laedt jedes Geraet ein Handyfoto bei jedem Abruf mit
+    let data=await _bildVerkleinern(e.target.result, 400, 'image/png');
+    if(data.length > 120000) data=await _bildVerkleinern(e.target.result, 400, 'image/jpeg', 0.85);
     state.settings.logoData=data;
+    state.settings._u=Date.now();
     updateLogoUI(data);
     save();
   };
@@ -4932,6 +5476,8 @@ function logoHochladen(input){
 }
 function logoEntfernen(){
   state.settings.logoData=null;
+  try{ localStorage.removeItem('fuchs_logo'); }catch(e){} // v7.9.4
+  state.settings._u=Date.now(); // v7.9.4
   updateLogoUI(null);
   save();
 }
@@ -4975,6 +5521,7 @@ function fotoKomprimieren(dataUrl, callback){
     const compressed = canvas.toDataURL('image/jpeg', 0.7);
     callback(compressed);
   };
+  img.onerror = function(){ alert('⚠️ Ein Foto konnte nicht gelesen werden (Format wird nicht unterstützt). Bitte erneut aufnehmen.'); }; // v7.9.4
   img.src = dataUrl;
 }
 
@@ -4986,13 +5533,13 @@ function auftragAnnehmenOeffnen(){
   modal.style.display = 'block';
 
   // Datum auf heute setzen
-  document.getElementById('aa-datum').value = new Date().toISOString().split('T')[0];
+  document.getElementById('aa-datum').value = _heuteISO();
   document.getElementById('aa-uhrzeit').value = new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
 
   // Bestehende Kunden laden
   const sel = document.getElementById('aa-kunde-existing');
   sel.innerHTML = '<option value="">— Neuen Kunden anlegen —</option>' +
-    state.kunden.map(k=>`<option value="${k.id}">${k.vorname} ${k.nachname} – ${k.strasse||''} ${k.ort||''}</option>`).join('');
+    state.kunden.map(k=>`<option value="${fxEsc(k.id)}">${fxEsc(kundeAnzeigeName(k))} – ${fxEsc(k.strasse||'')} ${fxEsc(k.ort||'')}</option>`).join('');
 
   // Mitarbeiter laden (inkl. Admin)
   const maSel = document.getElementById('aa-mitarbeiter');
@@ -5164,6 +5711,7 @@ function fotoKomprimieren(dataUrl, callback){
     const compressed = canvas.toDataURL('image/jpeg', 0.7);
     callback(compressed);
   };
+  img.onerror = function(){ alert('⚠️ Ein Foto konnte nicht gelesen werden (Format wird nicht unterstützt). Bitte erneut aufnehmen.'); }; // v7.9.4
   img.src = dataUrl;
 }
 
@@ -5181,7 +5729,7 @@ function annehmenKundeSuchen(q){
   const kunden = state.kunden||[];
   const ql = q.toLowerCase();
   const treffer = kunden.filter(k=>
-    (k.vorname+' '+k.nachname).toLowerCase().includes(ql)||
+    (k.vorname+' '+k.nachname+' '+(k.firma||'')).toLowerCase().includes(ql)||
     (k.nachname||'').toLowerCase().includes(ql)||
     (k.firma||'').toLowerCase().includes(ql)||
     (k.strasse||'').toLowerCase().includes(ql)||
@@ -5198,7 +5746,7 @@ function annehmenKundeSuchen(q){
   box.innerHTML = treffer.map(k=>`
     <div onclick="annehmenKundeAuswaehlen(${k.id})" style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:2px;" onmouseenter="this.style.background='var(--surface2)'" onmouseleave="this.style.background=''">
       <div style="font-weight:700;font-size:14px;">${lgEsc(kundeAnzeigeName(k))}</div>
-      <div style="font-size:12px;color:var(--text2);">${k.strasse||''} ${k.ort||''}${k.tel?' · '+k.tel:''}</div>
+      <div style="font-size:12px;color:var(--text2);">${fxEsc(k.strasse||'')} ${fxEsc(k.ort||'')}${k.tel?' · '+fxEsc(k.tel):''}</div>
     </div>`).join('');
 }
 
@@ -5210,6 +5758,7 @@ function annehmenKundeAuswaehlen(id){
   document.getElementById('an-kunde-felder').style.display='block';
   
   const felder = {
+    'an-firma': k.firma||'',
     'an-vorname': k.vorname||'',
     'an-nachname': k.nachname||'',
     'an-tel': k.tel||'',
@@ -5266,7 +5815,7 @@ function annehmenAuswahlAufheben(suchfeldLeeren){
   if(suche && suchfeldLeeren) suche.value='';
   const erg = document.getElementById('an-kunde-ergebnisse');
   if(erg && suchfeldLeeren) erg.style.display='none';
-  ['an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt'].forEach(id=>{
+  ['an-firma','an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt'].forEach(id=>{
     const el=document.getElementById(id);if(el)el.value='';
   });
   const btn = document.getElementById('an-neukunde-btn');
@@ -5282,7 +5831,7 @@ function kundeAnzeigeName(k){
   if(k.firma) return person ? k.firma+' – '+person : k.firma;
   return person || 'Kunde';
 }
-const ANNEHMEN_KUNDENFELDER=['an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt'];
+const ANNEHMEN_KUNDENFELDER=['an-firma','an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt'];
 function annehmenKundenfelderSperren(gesperrt){
   ANNEHMEN_KUNDENFELDER.forEach(id=>{
     const el=document.getElementById(id);if(!el)return;
@@ -5370,7 +5919,7 @@ function annehmenMitarbeiterUpdate(){
   if(!maSel) return;
   const zugaenge = (state.zugaenge||[]);
   maSel.innerHTML = '<option value="">— Noch nicht zuweisen —</option>' +
-    zugaenge.map(z=>`<option value="${z.id}">${z.name}${z.rolle==='chef'?' 👑 (ich selbst)':' ('+z.rolle+')'}</option>`).join('');
+    zugaenge.map(z=>`<option value="${fxEsc(z.id)}">${z.name}${z.rolle==='chef'?' 👑 (ich selbst)':' ('+z.rolle+')'}</option>`).join('');
 }
 
 function annehmenInit(){
@@ -5378,7 +5927,7 @@ function annehmenInit(){
   annehmenAuswahlAufheben(true);
   // Datum heute
   const datumEl = document.getElementById('an-datum');
-  if(datumEl) datumEl.value = new Date().toISOString().split('T')[0];
+  if(datumEl) datumEl.value = _heuteISO();
 
   // Kunden laden
   annehmenKundenSelectUpdate();
@@ -5389,7 +5938,7 @@ function annehmenInit(){
   if(maSel){
     const zugaenge = (state.zugaenge||[]);
     maSel.innerHTML = '<option value="">— Noch nicht zuweisen —</option>' +
-      zugaenge.map(z=>`<option value="${z.id}">${z.name}${z.rolle==='chef'?' 👑 (ich selbst)':' ('+z.rolle+')'}</option>`).join('');
+      zugaenge.map(z=>`<option value="${fxEsc(z.id)}">${z.name}${z.rolle==='chef'?' 👑 (ich selbst)':' ('+z.rolle+')'}</option>`).join('');
     // Falls Mitarbeiter eingeloggt ist, vorauswählen
     if(aktiverBenutzer && aktiverBenutzer.rolle==='chef'){
       // Chef bleibt bei Auswahl
@@ -5398,7 +5947,7 @@ function annehmenInit(){
 
   // Felder nur leeren wenn KEIN Kunde ausgewählt ist
   if(!window._annehmenKundeId){
-    ['an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt','an-beschreibung','an-intern'].forEach(id=>{
+    ['an-firma','an-vorname','an-nachname','an-tel','an-email','an-strasse','an-plz','an-ort','an-objekt','an-beschreibung','an-intern'].forEach(id=>{
       const el=document.getElementById(id);if(el)el.value='';
     });
   }
@@ -5414,6 +5963,7 @@ function annehmenKundeWaehlen(id){
   if(!id) return;
   const k = state.kunden.find(x=>x.id==id);
   if(!k) return;
+  const fF=document.getElementById('an-firma'); if(fF) fF.value = k.firma||'';
   document.getElementById('an-vorname').value = k.vorname||'';
   document.getElementById('an-nachname').value = k.nachname||'';
   document.getElementById('an-tel').value = k.tel||'';
@@ -5436,7 +5986,8 @@ function annehmenSpeichern(option){
     kunde = state.kunden.find(k=>k.id==kundeId);
     if(!kunde){alert('Der gewählte Kunde ist nicht mehr vorhanden (evtl. auf einem anderen Gerät gelöscht). Bitte Kunden neu auswählen.');return;}
   } else {
-    if(!vorname||!nachname){alert('Bitte Vor- und Nachname eingeben!');return;}
+    const firmaNeu=(document.getElementById('an-firma')||{}).value||'';
+    if(!firmaNeu.trim() && (!vorname||!nachname)){alert('Bitte Vor- und Nachname (oder eine Firma) eingeben!');return;}
   }
 
   // v7.6: Einsatzort ermitteln (Kopie im Auftrag, a.kunde bleibt Rechnungsempfaenger)
@@ -5464,6 +6015,7 @@ function annehmenSpeichern(option){
     kunde = {
       id:Date.now(),
       vorname, nachname,
+      firma:((document.getElementById('an-firma')||{}).value||'').trim(), // v7.9.4
       tel:document.getElementById('an-tel').value.trim(),
       email:document.getElementById('an-email').value.trim(),
       strasse:document.getElementById('an-strasse').value.trim(),
@@ -5567,10 +6119,10 @@ function annehmenSpeichern(option){
 function annehmenKalenderEintrag(auftrag, kunde, datumRaw, uhrzeit, beschreibung){
   state.termine.push({
     id: Date.now()+2,
-    titel: auftrag.art + ' – ' + kunde.vorname + ' ' + kunde.nachname,
+    titel: auftrag.art + ' – ' + kundeAnzeigeName(kunde),
     datum: datumRaw,
     zeit: uhrzeit||'08:00',
-    kunde: kunde.vorname+' '+kunde.nachname,
+    kunde: kundeAnzeigeName(kunde),
     kundeId: kunde.id,
     notiz: beschreibung||'',
     auftragId: auftrag.id
@@ -5634,7 +6186,7 @@ function auftragTabWechseln(tab){
 function renderAbgeschlosseneAuftraege(){
   const el = document.getElementById('auftraege-abgeschlossen-liste');
   if(!el) return;
-  const liste = state.auftraege.filter(a=>a.status==='abgeschlossen');
+  const liste = state.auftraege.filter(a=>a.status==='abgeschlossen'||a.status==='abgerechnet'); // v7.9.4
   if(!liste.length){el.innerHTML='<div class="empty">Keine abgeschlossenen Aufträge</div>';return;}
   el.innerHTML = liste.map(a=>fxAuftragKarte(a,`
           <button class="btn sm primary" onclick="auftragWiederOeffnen(${a.id})">📄</button>
@@ -5736,7 +6288,7 @@ function auftragArchivieren(id){
   const a = state.auftraege.find(x=>x.id===id);
   if(!a) return;
   if(!confirm('Auftrag '+a.nr+' ins Archiv verschieben?')) return;
-  a.status = 'archiv';
+  statusSetzen(a,'archiv');
   a.archiviertAm = new Date().toLocaleDateString('de-DE');
   a.zugewiesenAn = null; // Zuweisung entfernen
   renderAbgeschlosseneAuftraege();
@@ -5749,12 +6301,13 @@ function auftragArchivieren(id){
 // ══════════════════════════════════════════
 function auftraegeSuchen(q){
   const el=document.getElementById('auftraege-liste');
-  const alleAuftraege=state.auftraege.filter(a=>!a.inWarteschlange&&a.status!=='abgeschlossen'&&a.status!=='archiv'&&a.status!=='geplant');
+  const alleAuftraege=state.auftraege.filter(a=>!a.inWarteschlange&&a.status!=='abgeschlossen'&&a.status!=='abgerechnet'&&a.status!=='archiv'&&a.status!=='geplant');
   if(!alleAuftraege.length){el.innerHTML='<div class="empty">Noch keine Aufträge</div>';return;}
   const f=q.toLowerCase();
   const filtered=state.auftraege.filter(a=>!a.inWarteschlange&&(
     a.nr.toLowerCase().includes(f)||
-    (a.kunde.vorname+' '+a.kunde.nachname).toLowerCase().includes(f)||
+    kundeAnzeigeName(a.kunde).toLowerCase().includes(f)||
+    ((a.kunde&&a.kunde.ort)||'').toLowerCase().includes(f)||
     a.art.toLowerCase().includes(f)||
     (a.beschreibung||'').toLowerCase().includes(f)||
     a.datum.includes(f))
@@ -5774,22 +6327,25 @@ function auftragBearbeiten(id){
   modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:20001;overflow-y:auto;padding:16px;';
   modal.innerHTML=`<div style="background:var(--surface);border-radius:16px;max-width:560px;margin:0 auto;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
     <div style="background:var(--accent);color:var(--on-accent);padding:14px 16px;display:flex;justify-content:space-between;align-items:center;">
-      <div style="font-weight:700;">✏️ Auftrag bearbeiten – ${a.nr}</div>
+      <div style="font-weight:700;">✏️ Auftrag bearbeiten – ${fxEsc(a.nr)}</div>
       <button onclick="document.getElementById('auftrag-edit-modal').remove()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:16px;">✕</button>
     </div>
     <div style="padding:16px;display:flex;flex-direction:column;gap:10px;">
       <div class="form-row">
-        <div class="form-group"><label>Arbeitszeit (Std.)</label><input id="ae-arbeit" type="number" step="0.25" value="${a.arbeitStd}"></div>
-        <div class="form-group"><label>Fahrtzeit (Std.)</label><input id="ae-fahrt" type="number" step="0.25" value="${a.fahrtStd}"></div>
+        <div class="form-group"><label>Arbeitszeit (Std.)</label><input id="ae-arbeit" type="number" step="0.25" value="${fxEsc(a.arbeitStd)}"></div>
+        <div class="form-group"><label>Fahrtzeit (Std.)</label><input id="ae-fahrt" type="number" step="0.25" value="${fxEsc(a.fahrtStd)}"></div>
       </div>
       <div class="form-group"><label>Art der Arbeit</label>
         <select id="ae-art">
           ${['Kanalreinigung','Rohrreinigung','HD-Spülung','Wartung','Notdienst','Inspektion','Sonstiges'].map(o=>`<option ${a.art===o?'selected':''}>${o}</option>`).join('')}
         </select>
       </div>
-      <div class="form-group"><label>Beschreibung</label><textarea id="ae-beschreibung" style="min-height:60px;">${a.beschreibung||''}</textarea></div>
-      <div class="form-group"><label>Dokumentation</label><textarea id="ae-doku" style="min-height:80px;">${a.doku||''}</textarea></div>
-      <div class="form-group"><label>Datum</label><input id="ae-datum" type="text" value="${a.datum}"></div>
+      <div class="form-group"><label>Beschreibung</label><textarea id="ae-beschreibung" style="min-height:60px;">${fxEsc(a.beschreibung)}</textarea></div>
+      <div class="form-group"><label>Dokumentation</label><textarea id="ae-doku" style="min-height:80px;">${fxEsc(a.doku)}</textarea></div>
+      <div class="form-row">
+        <div class="form-group"><label>Datum</label><input id="ae-datum" type="date" value="${fxEsc(_auftragDatumISO(a))}"></div>
+        <div class="form-group"><label>Uhrzeit</label><input id="ae-uhrzeit" type="time" value="${fxEsc(a.geplantUhrzeit||'')}"></div>
+      </div>
       <button class="btn primary" onclick="auftragSpeichernEdit(${id})">✓ Änderungen speichern</button>
     </div>
   </div>`;
@@ -5797,6 +6353,12 @@ function auftragBearbeiten(id){
   modal.addEventListener('click',e=>{if(e.target===modal)modal.remove();});
 }
 
+function _auftragDatumISO(a){
+  if(a.datumRaw && /^\d{4}-\d{2}-\d{2}$/.test(a.datumRaw)) return a.datumRaw;
+  const p=String(a.datum||'').split('.');
+  if(p.length===3 && p[2].length===4) return p[2]+'-'+p[1].padStart(2,'0')+'-'+p[0].padStart(2,'0');
+  return '';
+}
 function auftragSpeichernEdit(id){
   const a=state.auftraege.find(x=>x.id===id);if(!a)return;
   const arbeit=parseFloat(document.getElementById('ae-arbeit').value)||0;
@@ -5807,8 +6369,22 @@ function auftragSpeichernEdit(id){
   a.art=document.getElementById('ae-art').value;
   a.beschreibung=document.getElementById('ae-beschreibung').value.trim();
   a.doku=document.getElementById('ae-doku').value.trim();
-  a.datum=document.getElementById('ae-datum').value.trim();
+  // v7.9.4: Datum als Kalenderfeld; geplant/offen und Kalendertermin passen sich an
+  const neuISO=document.getElementById('ae-datum').value;
+  const neuZeit=document.getElementById('ae-uhrzeit').value;
+  const altISO=_auftragDatumISO(a);
+  if(neuISO && neuISO!==altISO){
+    const [yy,mm,dd]=neuISO.split('-');
+    a.datum=parseInt(dd,10)+'.'+parseInt(mm,10)+'.'+yy;
+    a.datumRaw=neuISO;
+    const heute=_heuteISO();
+    if(a.status==='geplant' && neuISO<=heute) statusSetzen(a,'offen');
+    else if(a.status==='offen' && !a.maGestartet && neuISO>heute) statusSetzen(a,'geplant');
+  }
+  if(neuZeit!==(a.geplantUhrzeit||'')){ a.geplantUhrzeit=neuZeit; if(neuZeit) a.uhrzeit=neuZeit; }
+  (state.termine||[]).filter(t=>t.auftragId!=null&&t.auftragId==a.id).forEach(t=>{ if(neuISO) t.datum=neuISO; if(neuZeit) t.zeit=neuZeit; });
   document.getElementById('auftrag-edit-modal').remove();
+  try{ renderCal(); renderAlleTermine(); if(typeof renderGeplant==='function') renderGeplant(); }catch(e){}
   const pm=document.getElementById('protokoll-modal');if(pm)pm.remove();
   renderAuftraege();updateDashboard();save();
   alert('✓ Auftrag aktualisiert!');
@@ -5830,22 +6406,22 @@ function kundeBearbeiten(id){
     </div>
     <div style="padding:16px;display:flex;flex-direction:column;gap:10px;">
       <div class="form-row">
-        <div class="form-group"><label>Vorname</label><input id="ke-vorname" value="${k.vorname}"></div>
-        <div class="form-group"><label>Nachname</label><input id="ke-nachname" value="${k.nachname}"></div>
+        <div class="form-group"><label>Vorname</label><input id="ke-vorname" value="${fxEsc(k.vorname)}"></div>
+        <div class="form-group"><label>Nachname</label><input id="ke-nachname" value="${fxEsc(k.nachname)}"></div>
       </div>
       <div class="form-row full">
-        <div class="form-group"><label>Firmenname <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input id="ke-firma" value="${k.firma||''}" placeholder="z.B. Hausverwaltung Muster GmbH"></div>
+        <div class="form-group"><label>Firmenname <span style="font-weight:400;color:var(--text2);">(optional)</span></label><input id="ke-firma" value="${fxEsc(k.firma)}" placeholder="z.B. Hausverwaltung Muster GmbH"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>Telefon</label><input id="ke-tel" value="${k.tel||''}"></div>
-        <div class="form-group"><label>E-Mail</label><input id="ke-email" value="${k.email||''}"></div>
+        <div class="form-group"><label>Telefon</label><input id="ke-tel" value="${fxEsc(k.tel)}"></div>
+        <div class="form-group"><label>E-Mail</label><input id="ke-email" value="${fxEsc(k.email)}"></div>
       </div>
-      <div class="form-group"><label>Straße + Nr.</label><input id="ke-strasse" value="${k.strasse||''}"></div>
+      <div class="form-group"><label>Straße + Nr.</label><input id="ke-strasse" value="${fxEsc(k.strasse)}"></div>
       <div class="form-row">
-        <div class="form-group"><label>PLZ</label><input id="ke-plz" value="${k.plz||''}"></div>
-        <div class="form-group"><label>Ort</label><input id="ke-ort" value="${k.ort||''}"></div>
+        <div class="form-group"><label>PLZ</label><input id="ke-plz" value="${fxEsc(k.plz)}"></div>
+        <div class="form-group"><label>Ort</label><input id="ke-ort" value="${fxEsc(k.ort)}"></div>
       </div>
-      <div class="form-group"><label>Objekt / Liegenschaft</label><input id="ke-objekt" value="${k.objekt||''}"></div>
+      <div class="form-group"><label>Objekt / Liegenschaft</label><input id="ke-objekt" value="${fxEsc(k.objekt)}"></div>
       <div class="form-group"><label>Wartungsvertrag</label>
         <select id="ke-wartung">
           <option value="" ${!k.wartung?'selected':''}>Kein Wartungsvertrag</option>
@@ -5853,7 +6429,7 @@ function kundeBearbeiten(id){
           <option value="halbjaehrlich" ${k.wartung==='halbjaehrlich'?'selected':''}>Halbjährlich</option>
         </select>
       </div>
-      <div class="form-group"><label>Notizen</label><textarea id="ke-notizen" style="min-height:60px;">${k.notizen||''}</textarea></div>
+      <div class="form-group"><label>Notizen</label><textarea id="ke-notizen" style="min-height:60px;">${fxEsc(k.notizen)}</textarea></div>
       <button class="btn primary" onclick="kundeSpeichernEdit(${id})">✓ Änderungen speichern</button>
     </div>
   </div>`;
@@ -5874,9 +6450,14 @@ function kundeSpeichernEdit(id){
   k.objekt=document.getElementById('ke-objekt').value.trim();
   k.wartung=document.getElementById('ke-wartung').value;
   k.notizen=document.getElementById('ke-notizen').value.trim();
+  // v7.9.4: noch nicht erledigte Auftraege dieses Kunden bekommen die korrigierten Daten
+  // (Adresse/Telefon fuer Rachid und Navigation). Erledigte bleiben wie dokumentiert.
+  (state.auftraege||[]).forEach(a=>{
+    if(a.kunde && a.kunde.id==k.id && statusRang(a.status)<3) a.kunde=JSON.parse(JSON.stringify(k));
+  });
   document.getElementById('kunde-edit-modal').remove();
   const km=document.getElementById('kunde-modal');if(km)km.remove();
-  renderKunden();updateSelects();save();
+  renderKunden();updateSelects();renderAuftraege();updateDashboard();save();
   alert('✓ Kunde aktualisiert!');
 }
 
@@ -5891,14 +6472,20 @@ function pruefeWartungsvertraege(){
     // Letzten Auftrag für diesen Kunden finden
     const auftraege=state.auftraege.filter(a=>a.kunde&&a.kunde.id==k.id);
     if(!auftraege.length)return;
-    const letzter=auftraege[0]; // unshift → neuester zuerst
-    const letzterDatum=new Date(letzter.datum.split('.').reverse().join('-'));
+    // v7.9.4: neuester Auftrag nach Datum (Reihenfolge nach Sync nicht garantiert)
+    const mitDatum=auftraege.map(a=>({a,d:_auftragDatumISO(a)})).filter(x=>x.d).sort((x,y)=>y.d.localeCompare(x.d));
+    if(!mitDatum.length)return;
+    // schon etwas geplant/offen oder ein Termin in der Zukunft -> keine Erinnerung
+    const heuteISO=_heuteISO();
+    if(auftraege.some(a=>['geplant','offen','in_bearbeitung','warteschlange'].includes(a.status))) return;
+    if((state.termine||[]).some(t=>t.kundeId==k.id && (t.datum||'')>=heuteISO)) return;
+    const letzterDatum=new Date(mitDatum[0].d+'T00:00:00');
     const monate=k.wartung==='jaehrlich'?12:6;
     const faelligAb=new Date(letzterDatum);
     faelligAb.setMonth(faelligAb.getMonth()+monate);
     const diffTage=Math.floor((faelligAb-heute)/(1000*60*60*24));
     if(diffTage<=30&&diffTage>=-7){
-      hinweise.push(`${k.vorname} ${k.nachname}: Wartung ${diffTage<0?'überfällig':'fällig in '+diffTage+' Tagen'} (${k.wartung==='jaehrlich'?'Jährlich':'Halbjährlich'})`);
+      hinweise.push(`${fxEsc(kundeAnzeigeName(k))}: Wartung ${diffTage<0?'überfällig':'fällig in '+diffTage+' Tagen'} (${k.wartung==='jaehrlich'?'Jährlich':'Halbjährlich'})`);
     }
   });
   if(hinweise.length){
@@ -5917,22 +6504,28 @@ function pruefeWartungsvertraege(){
 // ══════════════════════════════════════════
 function auftraegeExportCSV(){
   if(!state.auftraege.length){alert('Keine Aufträge vorhanden.');return;}
-  const header=['Nr','Datum','Uhrzeit','Kunde','Straße','PLZ','Ort','Leistung','Beschreibung','Arbeitszeit Std','Fahrtzeit Std','Gesamtzeit Std','Material','Dokumentation','Unterschrift'];
-  const rows=state.auftraege.map(a=>[
+  // v7.9.4: mit Firma, Einsatzort, Status und Mitarbeiter
+  const header=['Nr','Datum','Uhrzeit','Firma','Kunde','Straße','PLZ','Ort','Einsatzort','Leistung','Beschreibung','Status','Mitarbeiter','Arbeitszeit Std','Fahrtzeit Std','Gesamtzeit Std','Material','Dokumentation','Unterschrift'];
+  const rows=state.auftraege.map(a=>{
+    const k=a.kunde||{}, eo=a.einsatzort;
+    const ma=a.abgeschlossenVon||((state.zugaenge||[]).find(z=>z.id==a.zugewiesenAn)||{}).name||(a.mitarb?((a.mitarb.vorname||'')+' '+(a.mitarb.nachname||'')).trim():'');
+    return [
     a.nr, a.datum, a.uhrzeit||'',
-    a.kunde.vorname+' '+a.kunde.nachname,
-    a.kunde.strasse||'', a.kunde.plz||'', a.kunde.ort||'',
-    a.art, (a.beschreibung||'').replace(/"/g,'""'),
-    a.arbeitStd, a.fahrtStd, a.gesamtStd,
+    k.firma||'', fxKundeName(k),
+    k.strasse||'', k.plz||'', k.ort||'',
+    eo?[eo.bezeichnung,eo.strasse,((eo.plz||'')+' '+(eo.ort||'')).trim()].filter(Boolean).join(', '):'',
+    a.art, a.beschreibung||'',
+    a.statusLabel||STATUS_LABEL[a.status]||a.status||'', ma,
+    String(a.arbeitStd||'').replace('.',','), String(a.fahrtStd||'').replace('.',','), String(a.gesamtStd||'').replace('.',','),
     a.materialien&&a.materialien.length?a.materialien.map(m=>m.name+' '+m.menge).join(' | '):'',
-    (a.doku||'').replace(/"/g,'""'),
+    a.doku||'',
     a.signiert?'Ja':'Nein'
-  ].map(v=>`"${v}"`).join(';'));
+  ].map(v=>`"${String(v==null?'':v).replace(/"/g,'""')}"`).join(';');});
   const csv='\uFEFF'+header.map(h=>`"${h}"`).join(';')+'\n'+rows.join('\n');
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
-  a.href=url;a.download='Auftraege_Fuchs_'+new Date().toISOString().split('T')[0]+'.csv';
+  a.href=url;a.download='Auftraege_Fuchs_'+_heuteISO()+'.csv';
   a.click();
   setTimeout(()=>URL.revokeObjectURL(url),5000);
 }
@@ -6158,7 +6751,7 @@ function auftragStatusAendern(id){
   popup.id = 'status-popup';
   popup.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:20000;display:flex;align-items:center;justify-content:center;padding:16px;';
   popup.innerHTML = `<div style="background:var(--surface);border-radius:16px;padding:20px;width:100%;max-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
-    <div style="font-weight:700;font-size:15px;margin-bottom:14px;">Status: ${a.nr}</div>
+    <div style="font-weight:700;font-size:15px;margin-bottom:14px;color:var(--text);">Status: ${fxEsc(a.nr)}</div>
     ${stati.map(s=>`<button onclick="auftragStatusSetzen(${id},'${s.key}','${s.label}')" style="width:100%;padding:12px;margin-bottom:8px;border:1.5px solid var(--border);border-radius:var(--radius);background:${a.status===s.key?'var(--accent)':'var(--surface2)'};color:${a.status===s.key?'#fff':'var(--text)'};font-size:14px;font-weight:600;cursor:pointer;text-align:left;">${s.label}</button>`).join('')}
     <button onclick="document.getElementById('status-popup').remove()" class="btn" style="width:100%;margin-top:4px;justify-content:center;">Abbrechen</button>
   </div>`;
@@ -6168,8 +6761,9 @@ function auftragStatusAendern(id){
 
 function auftragStatusSetzen(id, status, label){
   const a = state.auftraege.find(x=>x.id===id); if(!a)return;
-  a.status = status; a.statusLabel = label;
+  statusSetzen(a, status, label);
   document.getElementById('status-popup').remove();
+  updateWarteschlange(); updateDashboard();
   renderAuftraege(); save();
 }
 
@@ -6184,11 +6778,15 @@ function auftragDuplizieren(id){
   neu.nr = 'A-' + state.auftragNr++;
   neu.datum = new Date().toLocaleDateString('de-DE');
   neu.uhrzeit = new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
-  neu.status = 'offen';
-  neu.statusLabel = 'Offen';
+  // v7.9.4: nur Kunde/Leistung/Ort uebernehmen - kein Start, keine Zeiten, keine Doku, kein Mitarbeiter
+  ['maGestartet','maStartZeit','maTimerStart','doku','internNotiz','zeitManuell','timerRichtwertStd','abgeschlossenVon','abgeschlossenUm',
+   'archiviertAm','signerName','pdfHtml','zugewiesenAn','reihenfolge','warteschlange','maHinweis','datumRaw','geplantUhrzeit','_u','statusZeit','rechnungId'].forEach(f=>{ delete neu[f]; });
+  neu.arbeitStd='0.00'; neu.fahrtStd='0.00'; neu.gesamtStd='0.00';
+  neu.materialien = [];
   neu.signiert = false;
   neu.sigData = null;
   neu.fotos = [];
+  statusSetzen(neu,'offen');
   state.auftraege.unshift(neu);
   renderAuftraege(); updateDashboard(); save();
   alert(`✓ Auftrag ${neu.nr} angelegt!`);
@@ -6221,15 +6819,19 @@ function backupExportieren(){
     auftraege: state.auftraege,
     termine: state.termine,
     auftragNr: state.auftragNr,
+    rechnungen: state.rechnungen||[],   // v7.9.4: fehlten bisher
+    rechnungNr: state.rechnungNr||1001,
+    zugaenge: state.zugaenge||[],
     settings: {...state.settings, logoData: undefined}, // Logo nicht im Backup (zu groß)
-    exportDatum: new Date().toISOString()
+    exportDatum: new Date().toISOString(),
+    version: APP_VERSION
   };
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'Fuchs_Backup_' + new Date().toISOString().split('T')[0] + '.json';
+  a.download = 'Fuchs_Backup_' + _heuteISO() + '.json';
   a.click();
   setTimeout(()=>URL.revokeObjectURL(url), 5000);
 }
@@ -6241,8 +6843,22 @@ function backupImportieren(input){
     try {
       const data = JSON.parse(e.target.result);
       if(!data.kunden||!data.auftraege){alert('❌ Ungültige Backup-Datei');return;}
-      if(!confirm(`Backup vom ${data.exportDatum?new Date(data.exportDatum).toLocaleDateString('de-DE'):'unbekannt'} laden? Aktuelle Daten werden überschrieben!`))return;
-      Object.assign(state, data);
+      if(!confirm(`Backup vom ${data.exportDatum?new Date(data.exportDatum).toLocaleDateString('de-DE'):'unbekannt'} laden?\n\nAlle Einträge aus dem Backup werden wiederhergestellt (auch auf den anderen Geräten). Einträge, die erst nach dem Backup angelegt wurden, bleiben erhalten.`))return;
+      // v7.9.4: Backup muss beim Zusammenfuehren gewinnen -> frische Zeitstempel, Loesch-Markierungen aufheben
+      const jetzt=Date.now();
+      if(!state.geloescht||typeof state.geloescht!=='object') state.geloescht={};
+      SYNC_LISTEN.forEach(l=>{
+        if(!Array.isArray(data[l])) return;
+        const tot=state.geloescht[l]||{};
+        const wieder=state.geloescht['wieder_'+l]=state.geloescht['wieder_'+l]||{};
+        data[l].forEach(r=>{ if(r&&r.id!=null){ r._u=jetzt; if(tot[String(r.id)]) wieder[String(r.id)]=jetzt; delete tot[String(r.id)]; if(l==='auftraege'&&r.statusZeit) r.statusZeit=jetzt; } });
+        const ids=new Set(data[l].map(r=>String(r&&r.id)));
+        state[l]=data[l].concat((state[l]||[]).filter(r=>r&&!ids.has(String(r.id))));
+      });
+      if(data.settings){ state.settings=Object.assign({}, state.settings, data.settings, {logoData:(state.settings||{}).logoData, _u:jetzt}); }
+      if(data.auftragNr) state.auftragNr=Math.max(state.auftragNr||0, data.auftragNr);
+      if(data.rechnungNr) state.rechnungNr=Math.max(state.rechnungNr||0, data.rechnungNr);
+      _hashesNeuSetzen();
       renderKunden(); renderMitarbeiter(); renderAuftraege(); updateDashboard(); ladeEinstellungen(); save();
       alert('✓ Backup erfolgreich geladen!');
     } catch(err){alert('❌ Fehler beim Laden: ' + err.message);}
@@ -6256,7 +6872,7 @@ function backupImportieren(input){
 function initOfflineDetection(){
   window.addEventListener('online', ()=>{
     updateSyncStatus('↑ Online – synchronisiere...');
-    syncFromSupabase().then(()=>saveToSupabase());
+    syncPruefen(); // v7.9.4: leicht pruefen statt alles herunter- und hochladen
   });
   window.addEventListener('offline', ()=>{
     updateSyncStatus('⚠️ Offline – lokal gespeichert');
@@ -6327,7 +6943,7 @@ function renderStatistiken(){
   const totalGesamt = af.reduce((s,a)=>s+(parseFloat(a.gesamtStd)||0),0);
   const mitSig = af.filter(a=>a.signiert).length;
   const statusCount = {};
-  af.forEach(a=>{const s=a.statusLabel||a.status||'Offen';statusCount[s]=(statusCount[s]||0)+1;});
+  af.forEach(a=>{const s=STATUS_LABEL[a.status]||a.statusLabel||a.status||'Offen';statusCount[s]=(statusCount[s]||0)+1;}); // v7.9.4
 
   el.innerHTML = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">'
     + '<div style="background:var(--metric-grad);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px;"><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:4px;">Auftr\u00e4ge</div><div style="font-size:26px;font-weight:800;color:var(--accent);">'+af.length+'</div></div>'
@@ -6356,13 +6972,13 @@ function renderStatistiken(){
 
   // Top Kunden
   const kundenCount = {};
-  af.forEach(a=>{const n=a.kunde.vorname+' '+a.kunde.nachname;kundenCount[n]=(kundenCount[n]||0)+1;});
+  af.forEach(a=>{const n=kundeAnzeigeName(a.kunde);kundenCount[n]=(kundenCount[n]||0)+1;}); // v7.9.4: mit Firma
   const topKunden = Object.entries(kundenCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
   const el3 = document.getElementById('stats-kunden');
   if(el3){
     if(topKunden.length){
       el3.innerHTML = topKunden.map(([name,cnt],i) => {
-        return '<div class="list-item"><div style="display:flex;align-items:center;gap:10px;"><div style="width:28px;height:28px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:var(--accent);">'+(i+1)+'</div><div style="font-weight:600;">'+name+'</div></div><span class="badge">'+cnt+' Auftr.</span></div>';
+        return '<div class="list-item"><div style="display:flex;align-items:center;gap:10px;"><div style="width:28px;height:28px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:var(--accent);">'+(i+1)+'</div><div style="font-weight:600;">'+fxEsc(name)+'</div></div><span class="badge">'+cnt+' Auftr.</span></div>';
       }).join('');
     } else {
       el3.innerHTML = '<div class="empty">Keine Daten</div>';
@@ -6371,7 +6987,7 @@ function renderStatistiken(){
 }
 
 // INIT
-load().then(()=>{loginInit();initOfflineDetection();initPushBenachrichtigungen();updateWarteschlange();renderWarteschlange();geplantePruefen();setInterval(geplantePruefen, 60000);setTimeout(baustelleWiederherstellen, 500);});renderKunden();renderMitarbeiter();renderAuftraege();updateDashboard();ladeEinstellungen();renderZugaenge();updateRechnungenSelect();
+_fotoDbLaden().then(load).then(()=>{if(!window._loginGeprueft) loginInit();initOfflineDetection();initPushBenachrichtigungen();updateWarteschlange();renderWarteschlange();geplantePruefen();setInterval(geplantePruefen, 60000);setTimeout(baustelleWiederherstellen, 500);});renderKunden();renderMitarbeiter();renderAuftraege();updateDashboard();ladeEinstellungen();renderZugaenge();updateRechnungenSelect();
 </script>
 </body>
 </html>
